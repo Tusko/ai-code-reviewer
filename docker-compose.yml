@@ -1,0 +1,30 @@
+services:
+  app:
+    build: .
+    environment:
+      - GITLAB_URL=${GITLAB_URL:-https://gitlab.com}
+      - GITLAB_TOKEN=${GITLAB_TOKEN}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-codellama}
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
