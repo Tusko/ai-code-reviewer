@@ -9,6 +9,7 @@ services:
       - OLLAMA_MODEL=${OLLAMA_MODEL:-codellama}
     depends_on:
       - ollama
+    restart: always
 
   ollama:
     image: ollama/ollama:latest
@@ -18,13 +19,14 @@ services:
       - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
+    restart: always
 
   tunnel:
     image: cloudflare/cloudflared:latest
     command: tunnel run
     environment:
       - TUNNEL_TOKEN=${TUNNEL_TOKEN}
-    restart: unless-stopped
+    restart: always
 
 volumes:
   ollama_data:

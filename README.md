@@ -45,12 +45,15 @@ This project sets up a local AI Code Review bot that integrates with GitLab Merg
     *   Go to your GitLab Project > **Settings > Webhooks**.
     *   **URL:** `https://code-review.yourdomain.com/webhook` (The public hostname you set in Cloudflare).
     *   **Secret Token:** The same `WEBHOOK_SECRET` from your `.env`.
-    *   **Trigger:** Check **Merge request events**.
+    *   **Triggers:** check **Merge request events** *and* **Note events** (so the bot can also respond to review comments).
     *   Click **Add webhook**.
 
 ## Usage
 
-Create a Merge Request in your GitLab project. The AI reviewer will automatically comment on the MR with feedback.
+- **Automatic reviews:** Create or update a Merge Request in your GitLab project. The AI reviewer will automatically comment on the MR with feedback.
+- **Manual trigger via comment:** Post a comment containing `/review` (case-insensitive) on any MR. The bot will fetch the current diff and post its AI review again.
+
+You can change or extend the keyword by editing `review_server.py` if desired.
 
 ## Troubleshooting
 
