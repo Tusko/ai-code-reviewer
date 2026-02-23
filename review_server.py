@@ -21,34 +21,30 @@ if GITLAB_TOKEN:
 else:
     logging.warning("GITLAB_TOKEN not provided. Application will fail to authenticate.")
 
-def get_ollama_review(diff_text):
-    """Send the diff to Ollama for review."""
-    prompt = f"""Act as a Principal Software Engineer. Review the following git diff for logic errors, security vulnerabilities, and maintainability.
+def get_ollama_review(prompt_payload):
+    """Send the full file context and diff to Ollama for review."""
+    
+    prompt = f"""Act as a Principal Software Engineer. You are performing a code review. 
+I will provide you with the FULL code of the files being modified for context, followed by the specific GIT DIFF.
 
 ### Contextual Instructions (Crucial):
-1. **DELETIONS:** If the diff shows code being REMOVED (lines starting with `-`), do NOT flag those lines as "unused" or "needing removal." Assume the author is already cleaning them up.
-2. **SCOPE:** Only critique the code that remains or is newly added. If a removal causes a breaking change elsewhere, flag the impact, not the deletion itself.
-3. **DEDUPLICATION:** Do not create multiple points for the same root cause. Group related issues into a single concise bullet.
-4. **LGTM:** If the code is high-quality or the cleanup is correct, respond ONLY with: "LGTM. The changes are clean and follow best practices."
+1. **FOCUS:** ONLY critique the lines of code added or modified in the GIT DIFF. Use the FULL FILE solely to understand the surrounding context (like variable definitions, class structures, or imports).
+2. **DELETIONS:** If the diff shows code being REMOVED (lines starting with `-`), do NOT flag those lines as "unused".
+3. **DEDUPLICATION:** Do not create multiple points for the same root cause. 
+4. **LGTM:** If the code in the diff is high-quality, respond ONLY with: "LGTM. The changes are clean and follow best practices."
 
 ### Response Format:
 - **No Preamble:** Do not say "Here is my review" or "I have analyzed the code."
 - **Tone:** Professional, direct, and actionable.
-- **Address Author:** Use the name found in the patch; otherwise, start with "Reviewing the changes..."
-- **Severity Tags:** Use only these three:
-    - [BLOCKER]: Critical bugs, security risks, or broken logic.
-    - [SUGGESTION]: Performance or architectural improvements.
-    - [NIT]: Minor style or readability issues.
+- **Severity Tags:** Use only: [BLOCKER], [SUGGESTION], or [NIT].
 
 ### Constraints:
-- Max 300 words total. 
+- Max 300-500 words total, depends on context. 
 - No emojis. 
 - Provide code snippets for fixes only when necessary for clarity.
 
 ---
-
-Diff:
-{diff_text}
+{prompt_payload}
 """
     
     try:
@@ -57,7 +53,10 @@ Diff:
             json={
                 "model": OLLAMA_MODEL,
                 "prompt": prompt,
-                "stream": False
+                "stream": False,
+                "options": {
+                    "num_ctx": 8192 # Increases context window for M4 Mac (requires ~8GB+ RAM)
+                }
             },
             timeout=300
         )
@@ -109,32 +108,41 @@ def review_merge_request(project_id, mr_iid):
     project = gl.projects.get(project_id)
     mr = project.mergerequests.get(mr_iid)
     changes = mr.changes().get('changes', [])
-    full_diff = ''
+    
+    prompt_payload = ""
+    
     for change in changes:
-        full_diff += f"File: {change['new_path']}\n{change['diff']}\n\n"
-    if not full_diff.strip():
+        file_path = change['new_path']
+        diff = change['diff']
+        
+        # Skip fully deleted files (nothing to review)
+        if change.get('deleted_file'):
+            continue
+            
+        try:
+            # Fetch the entire file content from the MR's source branch
+            gl_file = project.files.get(file_path=file_path, ref=mr.source_branch)
+            # decode() gets the bytes, the second decode('utf-8') turns it into a string
+            full_file_content = gl_file.decode().decode('utf-8') 
+            
+            prompt_payload += f"\n### FILE CONTEXT: {file_path} ###\n```\n{full_file_content}\n```\n"
+            prompt_payload += f"\n### GIT DIFF: {file_path} ###\n```diff\n{diff}\n```\n"
+            
+        except gitlab.exceptions.GitlabGetError:
+            # Fallback if the file can't be fetched (e.g., brand new files might behave differently)
+            logging.warning(f"Could not fetch full file {file_path}. Using diff only.")
+            prompt_payload += f"\n### GIT DIFF (No Context Found): {file_path} ###\n```diff\n{diff}\n```\n"
+
+    if not prompt_payload.strip():
         return jsonify({'message': 'No changes to review'}), 200
-    review_comment = get_ollama_review(full_diff)
-    mr.notes.create({'body': f"## 🤖 AI Code Review\n\n{review_comment}"})
-    return jsonify({'message': 'Review posted successfully'}), 200
 
-
-def review_merge_request(project_id, mr_iid):
-    project = gl.projects.get(project_id)
-    mr = project.mergerequests.get(mr_iid)
-    # Get the changes (diff)
-    changes = mr.changes().get('changes', [])
-    full_diff = ""
-    for change in changes:
-        full_diff += f"File: {change['new_path']}\n"
-        full_diff += change['diff'] + "\n\n"
-    if not full_diff.strip():
-        return jsonify({'message': 'No changes to review'}), 200
-
-    logging.info(f"Requesting review for MR !{mr_iid} in project {project_id}. Diff size: {len(full_diff)} characters.")
-    review_comment = get_ollama_review(full_diff)
+    logging.info(f"Requesting review for MR !{mr_iid}. Payload size: {len(prompt_payload)} chars.")
+    
+    review_comment = get_ollama_review(prompt_payload)
+    
     mr.notes.create({'body': f"## 🤖 AI Code Review\n\n{review_comment}"})
     logging.info(f"Posted review for MR !{mr_iid}")
+    
     return jsonify({'message': 'Review posted successfully'}), 200
 
 @app.route('/health', methods=['GET'])
