@@ -1,32 +1,23 @@
 services:
   app:
     build: .
+    env_file:
+      - .env
     environment:
       - GITLAB_URL=${GITLAB_URL:-https://gitlab.com}
       - GITLAB_TOKEN=${GITLAB_TOKEN}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
-      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_HOST=http://host.docker.internal:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-codellama}
-    depends_on:
-      - ollama
-    restart: always
-
-  ollama:
-    image: ollama/ollama:latest
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    volumes:
-      - ollama_data:/root/.ollama
-    ports:
-      - "11434:11434"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
 
   tunnel:
     image: cloudflare/cloudflared:latest
+    env_file:
+      - .env
     command: tunnel run
     environment:
       - TUNNEL_TOKEN=${TUNNEL_TOKEN}
     restart: always
-
-volumes:
-  ollama_data:
