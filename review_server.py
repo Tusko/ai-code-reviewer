@@ -207,7 +207,12 @@ def review_merge_request(project_id, mr_iid):
             prompt_payload += f"\n--- DIFF ONLY: {file_path} ---\n```diff\n{diff}\n```\n"
 
     if not prompt_payload.strip():
-        return jsonify({'message': 'No changes found'}), 200
+        logging.info(f"No changes found for MR !{mr_iid} in project {project_id}")
+        try:
+            mr.notes.create({'body': "## 🤖 AI Code Review\n\nNo changes found to review in this merge request."})
+        except Exception as e:
+            logging.error(f"Failed to post 'no changes' comment to GitLab: {e}")
+        return
 
     # Pass this to your get_ollama_review function
     review_comment = get_ollama_review(prompt_payload)
