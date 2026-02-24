@@ -41,6 +41,25 @@ This project sets up a local AI Code Review bot that integrates with GitLab Merg
     ```
     (You can swap `codellama` for `llama3`, `mistral`, etc., in `.env` and here).
 
+    Using qwen2.5-coder
+    -------------------
+    If you want to use the `qwen2.5-coder:7b-instruct-q4_K_M` model, set the `OLLAMA_MODEL` value in your `.env` file:
+
+    ```dotenv
+    OLLAMA_MODEL=qwen2.5-coder:7b-instruct-q4_K_M
+    ```
+
+    Then pull that model inside the `ollama` container:
+
+    ```bash
+    docker compose exec ollama ollama pull qwen2.5-coder:7b-instruct-q4_K_M
+    ```
+
+    Notes:
+    - The model string may include quantization or "instruct" suffixes — keep the exact name in `.env`.
+    - After pulling, the service will use the model referenced by `OLLAMA_MODEL` when handling reviews.
+    - Start or restart the services if you change `.env` so the new model name is picked up.
+
 7.  **Configure GitLab Webhook:**
     *   Go to your GitLab Project > **Settings > Webhooks**.
     *   **URL:** `https://code-review.yourdomain.com/webhook` (The public hostname you set in Cloudflare).
