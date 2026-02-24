@@ -154,6 +154,18 @@ def webhook():
 
     # 3. START BACKGROUND THREAD (The Fix)
     if project_id and mr_iid:
+        # If possible, check the MR's source branch and ignore release/* branches
+        try:
+            if 'gl' in globals() and gl:
+                project = gl.projects.get(project_id)
+                mr_obj = project.mergerequests.get(mr_iid)
+                source_branch = getattr(mr_obj, 'source_branch', '') or ''
+                if 'release/' in source_branch:
+                    logging.info(f"Ignoring MR !{mr_iid} from release branch {source_branch}")
+                    return jsonify({'message': 'Ignored release branch'}), 200
+        except Exception as e:
+            logging.debug(f"Could not evaluate branch name before starting review: {e}")
+
         # We start the review process in a background thread
         thread = threading.Thread(target=review_merge_request, args=(project_id, mr_iid))
         thread.start()
