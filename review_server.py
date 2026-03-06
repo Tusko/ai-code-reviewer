@@ -1,142 +1,201 @@
 import os
+import re
 import logging
 import requests
-from ollama import Client
 import threading
 import gitlab
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Configuration
+# ==========================================
+# CONFIGURATION
+# ==========================================
 GITLAB_URL = os.environ.get('GITLAB_URL', 'https://gitlab.com')
 GITLAB_TOKEN = os.environ.get('GITLAB_TOKEN')
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET')
 OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://host.docker.internal:11434')
-OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'codellama')
-logging.info(f"Resolved OLLAMA_HOST: {OLLAMA_HOST}")
+OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'qwen2.5-coder:7b')
 
-logging.basicConfig(level=logging.INFO)
+# Thread lock to prevent overloading the Mac Mini M4 16GB RAM
+review_lock = threading.Lock()
 
-# Initialize Ollama client. Prefer local modes, fall back to host HTTP API.
-client = None
-in_docker = os.path.exists('/.dockerenv') or os.environ.get('IN_DOCKER') == '1'
-init_attempts = [
-    {'use_local': True},
-    {'useLocal': True},
-    {'local': True},
-    {'host': OLLAMA_HOST},
-    {}
-]
-for opts in init_attempts:
-    try:
-        client = Client(**opts)
-        logging.info(f"Initialized Ollama Client with options: {opts}")
-        break
-    except TypeError:
-        # Some client versions may not accept these kwargs; try the next
-        continue
-    except Exception as e:
-        logging.debug(f"Ollama Client init with {opts} failed: {e}")
+# ==========================================
+# LOGGING SETUP
+# ==========================================
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+LOG_FILE = os.environ.get('LOG_FILE')
 
-if client is None:
-    logging.warning(
-        "Could not initialize Ollama Client with local or host options. "
-        "If Ollama is running on the macOS host and this app runs in Docker, "
-        "set OLLAMA_HOST=http://host.docker.internal:11434 or run the server on the host."
-    )
+handlers = [logging.StreamHandler()]
+if LOG_FILE:
+    handlers.append(logging.FileHandler(LOG_FILE))
 
-# Initialize GitLab client
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    handlers=handlers,
+)
+
+logging.info(f"Resolved OLLAMA_HOST: {OLLAMA_HOST}, OLLAMA_MODEL: {OLLAMA_MODEL}")
+
+# ==========================================
+# GITLAB CLIENT INIT
+# ==========================================
+gl = None
 if GITLAB_TOKEN:
     gl = gitlab.Gitlab(GITLAB_URL, private_token=GITLAB_TOKEN)
 else:
     logging.warning("GITLAB_TOKEN not provided. Application will fail to authenticate.")
 
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
+def get_surgical_context(full_text, diff_hunk, window=30):
+    """
+    Extracts only the relevant lines around the diff to prevent prompt truncation.
+    Saves massive amounts of memory and ensures the AI actually reads the system prompt.
+    """
+    try:
+        # Find the line number where the change starts (e.g., @@ -14,5 +14,6 @@)
+        match = re.search(r'@@ -\d+,\d+ \+(\d+)(?:,\d+)? @@', diff_hunk)
+        if not match:
+            return "Context extraction unavailable."
+
+        start_line = int(match.group(1))
+        lines = full_text.splitlines()
+
+        # Calculate a 30-line window above and below the change
+        start_idx = max(0, start_line - 1 - window)
+        end_idx = min(len(lines), start_line - 1 + window)
+
+        return "\n".join(lines[start_idx:end_idx])
+    except Exception as e:
+        logging.debug(f"Failed to extract surgical context: {e}")
+        return "Context extraction failed. Review diff directly."
+
 def get_ollama_review(prompt_payload):
-    """Send the full file context and diff to Ollama for review."""
-    
-    prompt = f"""Act as a Principal Software Engineer. You are performing a code review. 
-I will provide you with the FULL code of the files being modified for context, followed by the specific GIT DIFF.
+    """Sends the optimized payload to the local Ollama API."""
+    prompt = f"""Act as a Principal Software Engineer performing a strict code review. 
+You will receive "Surgical Context" (a small chunk of the file) and the GIT DIFF hunks (the actual changes).
 
-### Contextual Instructions (Crucial):
-1. **FOCUS:** ONLY critique the lines of code added or modified in the GIT DIFF. Use the FULL FILE solely to understand the surrounding context (like variable definitions, class structures, or imports).
-2. **DELETIONS:** If the diff shows code being REMOVED (lines starting with `-`), do NOT flag those lines as "unused".
-3. **DEDUPLICATION:** Do not create multiple points for the same root cause. 
-4. **LGTM:** If the code in the diff is high-quality, respond ONLY with: "LGTM. The changes are clean and follow best practices."
+### CORE DIRECTIVE: NO SUMMARIES
+1. DO NOT explain what the code does. 
+2. DO NOT summarize the pull request, the diff, or the file. 
+3. DO NOT output preamble, intro, or concluding remarks.
+Your SOLE PURPOSE is to find specific defects in the ADDED (+) or MODIFIED lines. If you find no actionable defects, you must only output "LGTM."
 
-### Response Format:
-- **No Preamble:** Do not say "Here is my review" or "I have analyzed the code."
-- **Tone:** Professional, direct, and actionable.
-- **Severity Tags:** Use only: [BLOCKER], [SUGGESTION], or [NIT].
+### What to Review For
+Critique the DIFF strictly for:
+- Logic errors, unhandled edge cases, or potential crashes.
+- Security vulnerabilities (e.g., injection, bad validation).
+- Performance bottlenecks (e.g., N+1 queries, inefficient loops).
 
-### Constraints:
-- Max 300-500 words total, depends on context. 
-- No emojis. 
-- Provide code snippets for fixes only when necessary for clarity.
+### Crucial Constraints
+1. **CONTEXT ONLY:** Use the Surgical Context solely to understand surrounding definitions. DO NOT review lines outside the diff.
+2. **DELETIONS:** Ignore removed lines (starting with `-`). Do not flag them as "unused".
+3. **UNUSED CODE:** DO NOT flag methods or variables as "unused". The code provided is only a fragment of the application. Assume it is used elsewhere.
+4. **HALLUCINATIONS:** ONLY mention files explicitly listed in the diff headers.
 
-### CRITICAL RULES:
-1. **NO UNUSED CODE SEARCHING:** Do NOT flag methods or variables as "unused" unless you are 100% certain they are not used anywhere in the FULL FILE CONTENT provided. 
-2. **STAGED CHANGES:** If a method is defined in the file but not called yet, assume it is being exported for use in other files or is part of a larger feature. Do not mark it for removal.
-3. **ONLY REVIEW THE DIFF:** Your critique must focus on the logic inside the GIT DIFF sections.
+### Strict Response Format
+You must respond ONLY using the exact structure below. 
 
+FILE: <file_path>
+- [BLOCKER] One-sentence description of the critical bug. Code fix.
+- [SUGGESTION] One-sentence description of the issue. Code fix.
+- [NIT] One-sentence description of styling issue.
+
+If there are NO actionable issues across ALL diffs, output exactly:
+LGTM. The changes are clean and follow best practices.
 ---
 {prompt_payload}
 """
     
     try:
-        if client:
-            resp = client.generate(
-                model=OLLAMA_MODEL,
-                prompt=prompt,
-                stream=False,
-                options={
+        logging.info("Sending optimized prompt to Ollama HTTP API...")
+        response = requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
                     "num_ctx": 8192,
-                    "temperature": 0.0,
-                    "num_predict": 800,
-                    "top_p": 0.9,
+                    "temperature": 0.0,     # Zero creativity, strict facts only
+                    "num_predict": 800,     # Prevent endless rambling
+                    "top_p": 0.9
                 }
-            )
-
-            # Try to extract common response fields from the client result
-            if hasattr(resp, 'response'):
-                return resp.response
-            elif isinstance(resp, dict):
-                return resp.get('response') or resp.get('output') or resp.get('text') or str(resp)
-            return str(resp)
-        else:
-            # Fallback to HTTP API if client isn't available
-            response = requests.post(
-                f"{OLLAMA_HOST}/api/generate",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "num_ctx": 8192,
-                        "temperature": 0.0,
-                        "num_predict": 800,
-                        "top_p": 0.9
-                    }
-                },
-                timeout=600
-            )
-            response.raise_for_status()
-            return response.json().get('response', 'No response from AI.')
+            },
+            timeout=600 # 10 minute timeout
+        )
+        response.raise_for_status()
+        return response.json().get('response', 'No response from AI.')
     except Exception as e:
         logging.error(f"Error communicating with Ollama: {e}")
         return f"Error communicating with AI Reviewer: {e}"
 
+def review_merge_request(project_id, mr_iid):
+    """Fetches changes, builds prompt, and posts review to GitLab."""
+    with review_lock: # Prevents multiple MRs from crashing the RAM simultaneously
+        try:
+            project = gl.projects.get(project_id)
+            mr = project.mergerequests.get(mr_iid)
+            source_branch = mr.source_branch 
+            changes = mr.changes().get('changes', [])
+            
+            prompt_payload = ""
+            
+            for change in changes:
+                file_path = change['new_path']
+                diff = change['diff']
+                
+                if change.get('deleted_file'):
+                    continue
+                    
+                try:
+                    gl_file = project.files.get(file_path=file_path, ref=source_branch)
+                    full_file_content = gl_file.decode().decode('utf-8') 
+                    
+                    # APPLY SURGICAL CONTEXT HERE
+                    surgical_context = get_surgical_context(full_file_content, diff)
+                    
+                    prompt_payload += f"\n--- FILE: {file_path} (Context Window) ---\n"
+                    prompt_payload += f"```\n{surgical_context}\n```\n"
+                    prompt_payload += f"\n--- DIFF TO REVIEW: {file_path} ---\n"
+                    prompt_payload += f"```diff\n{diff}\n```\n"
+                    
+                except Exception as e:
+                    logging.warning(f"Fallback: Could not fetch {file_path}. Error: {e}")
+                    prompt_payload += f"\n--- DIFF ONLY: {file_path} ---\n```diff\n{diff}\n```\n"
+
+            if not prompt_payload.strip():
+                logging.info(f"No changes found for MR !{mr_iid}")
+                return
+
+            # Check if payload is still too large (failsafe)
+            if len(prompt_payload) > 25000:
+                prompt_payload = prompt_payload[:25000] + "\n... [TRUNCATED FOR MEMORY SAFETY] ..."
+
+            review_comment = get_ollama_review(prompt_payload)
+
+            mr.notes.create({'body': f"## 🤖 AI Code Review\n\n{review_comment}"})
+            logging.info(f"Review posted successfully to MR !{mr_iid}")
+            
+        except Exception as e:
+            logging.error(f"Critical error in background review thread: {e}")
+
+
+# ==========================================
+# FLASK ROUTES
+# ==========================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # 1. Verify Secret Token (Immediate)
+    # Verify Secret Token
     token = request.headers.get('X-Gitlab-Token')
     if WEBHOOK_SECRET and token != WEBHOOK_SECRET:
         return jsonify({'error': 'Invalid token'}), 403
 
     event_type = request.headers.get('X-Gitlab-Event')
     data = request.json
-
-    # 2. Identify the work to be done
     project_id = None
     mr_iid = None
 
@@ -152,76 +211,24 @@ def webhook():
             project_id = data['project']['id']
             mr_iid = obj['iid']
 
-    # 3. START BACKGROUND THREAD (The Fix)
     if project_id and mr_iid:
-        # If possible, check the MR's source branch and ignore release/* branches
+        # Branch validation failsafe
         try:
-            if 'gl' in globals() and gl:
+            if gl:
                 project = gl.projects.get(project_id)
                 mr_obj = project.mergerequests.get(mr_iid)
-                source_branch = getattr(mr_obj, 'source_branch', '') or ''
-                if 'release/' in source_branch:
-                    logging.info(f"Ignoring MR !{mr_iid} from release branch {source_branch}")
+                if 'release/' in (getattr(mr_obj, 'source_branch', '') or ''):
                     return jsonify({'message': 'Ignored release branch'}), 200
-        except Exception as e:
-            logging.debug(f"Could not evaluate branch name before starting review: {e}")
+        except Exception:
+            pass
 
-        # We start the review process in a background thread
+        # Fire and Forget Threading
         thread = threading.Thread(target=review_merge_request, args=(project_id, mr_iid))
         thread.start()
-        # Immediately return 202 Accepted to GitLab
+        
         return jsonify({'message': 'Review started in background'}), 202
 
     return jsonify({'message': 'Ignored event'}), 200
-
-
-def review_merge_request(project_id, mr_iid):
-    project = gl.projects.get(project_id)
-    mr = project.mergerequests.get(mr_iid)
-    
-    # Use the branch where the NEW code lives
-    source_branch = mr.source_branch 
-    changes = mr.changes().get('changes', [])
-    
-    prompt_payload = ""
-    
-    for change in changes:
-        file_path = change['new_path']
-        diff = change['diff']
-        
-        if change.get('deleted_file'):
-            continue
-            
-        try:
-            # Fetching the file from the branch being reviewed
-            gl_file = project.files.get(file_path=file_path, ref=source_branch)
-            full_file_content = gl_file.decode().decode('utf-8') 
-            
-            prompt_payload += f"\n--- FILE: {file_path} (Full Content from {source_branch}) ---\n"
-            prompt_payload += f"```\n{full_file_content}\n```\n"
-            prompt_payload += f"\n--- DIFF TO REVIEW: {file_path} ---\n"
-            prompt_payload += f"```diff\n{diff}\n```\n"
-            
-        except Exception as e:
-            logging.warning(f"Fallback: Could not fetch {file_path}. Error: {e}")
-            prompt_payload += f"\n--- DIFF ONLY: {file_path} ---\n```diff\n{diff}\n```\n"
-
-    if not prompt_payload.strip():
-        logging.info(f"No changes found for MR !{mr_iid} in project {project_id}")
-        try:
-            mr.notes.create({'body': "## 🤖 AI Code Review\n\nNo changes found to review in this merge request."})
-        except Exception as e:
-            logging.error(f"Failed to post 'no changes' comment to GitLab: {e}")
-        return
-
-    # Pass this to your get_ollama_review function
-    review_comment = get_ollama_review(prompt_payload)
-
-    try:
-        mr.notes.create({'body': f"## 🤖 AI Code Review\n\n{review_comment}"})
-        logging.info(f"Review posted successfully to MR !{mr_iid}")
-    except Exception as e:
-        logging.error(f"Failed to post comment to GitLab: {e}")
 
 @app.route('/health', methods=['GET'])
 def health():
