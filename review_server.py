@@ -95,6 +95,7 @@ Critique the DIFF strictly for:
 2. **DELETIONS:** Ignore removed lines (starting with `-`). Do not flag them as "unused".
 3. **UNUSED CODE:** DO NOT flag methods or variables as "unused". The code provided is only a fragment of the application. Assume it is used elsewhere.
 4. **HALLUCINATIONS:** ONLY mention files explicitly listed in the diff headers.
+5. **NO FORMATTING NITS:** DO NOT flag whitespace, comma spacing, or other style issues. The project uses ESLint/Prettier for formatting. Focus only on logic, security, and performance.
 
 ### Strict Response Format
 You must respond ONLY using the exact structure below. 
