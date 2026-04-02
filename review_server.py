@@ -52,84 +52,100 @@ else:
 # ==========================================
 def get_surgical_context(full_text, diff_hunk, window=30):
     """
-    Extracts only the relevant lines around the diff to prevent prompt truncation.
-    Saves massive amounts of memory and ensures the AI actually reads the system prompt.
+    Extracts multiple context chunks if there are multiple diff hunks.
     """
     try:
-        # Find the line number where the change starts (e.g., @@ -14,5 +14,6 @@)
-        match = re.search(r'@@ -\d+,\d+ \+(\d+)(?:,\d+)? @@', diff_hunk)
-        if not match:
-            return "Context extraction unavailable."
-
-        start_line = int(match.group(1))
         lines = full_text.splitlines()
-
-        # Calculate a 30-line window above and below the change
-        start_idx = max(0, start_line - 1 - window)
-        end_idx = min(len(lines), start_line - 1 + window)
-
-        return "\n".join(lines[start_idx:end_idx])
+        context_blocks = []
+        
+        # Знаходимо всі місця змін у diff-файлі
+        matches = re.finditer(r'@@ -\d+,\d+ \+(\d+)(?:,\d+)? @@', diff_hunk)
+        
+        for match in matches:
+            start_line = int(match.group(1))
+            start_idx = max(0, start_line - 1 - window)
+            end_idx = min(len(lines), start_line - 1 + window)
+            
+            chunk = "\n".join(lines[start_idx:end_idx])
+            context_blocks.append(f"Lines {start_idx+1}-{end_idx}:\n{chunk}")
+            
+        if not context_blocks:
+            return "Context extraction unavailable."
+            
+        return "\n...\n".join(context_blocks)
     except Exception as e:
         logging.debug(f"Failed to extract surgical context: {e}")
         return "Context extraction failed. Review diff directly."
 
 def get_ollama_review(prompt_payload):
     """Sends the optimized payload to the local Ollama API."""
-    prompt = f"""Act as a Principal Software Engineer performing a strict code review. 
-You will receive "Surgical Context" (a small chunk of the file) and the GIT DIFF hunks (the actual changes).
+    
+    system_prompt = """Act as a Principal Software Engineer code reviewer.
 
-### CORE DIRECTIVE: NO SUMMARIES
-1. DO NOT explain what the code does. 
-2. DO NOT summarize the pull request, the diff, or the file. 
-3. DO NOT output preamble, intro, or concluding remarks.
-Your SOLE PURPOSE is to find specific defects in the ADDED (+) or MODIFIED lines. If you find no actionable defects, you must only output "LGTM."
+### CRUCIAL CONSTRAINTS
+1. ONLY analyze the diff provided.
+2. Assume any missing variables/functions are defined elsewhere.
+3. Use Markdown formatting to make your response highly readable (paragraphs, bold text, bullet points, and code blocks).
 
-### What to Review For
-Critique the DIFF strictly for:
-- Logic errors, unhandled edge cases, or potential crashes.
-- Security vulnerabilities (e.g., injection, bad validation).
-- Performance bottlenecks (e.g., N+1 queries, inefficient loops).
+### RESPONSE FORMAT
+Review the code and output ONLY using this exact structure. Do not add any introductory or concluding remarks.
 
-### Crucial Constraints
-1. **CONTEXT ONLY:** Use the Surgical Context solely to understand surrounding definitions. DO NOT review lines outside the diff.
-2. **DELETIONS:** Ignore removed lines (starting with `-`). Do not flag them as "unused".
-3. **UNUSED CODE:** DO NOT flag methods or variables as "unused". The code provided is only a fragment of the application. Assume it is used elsewhere.
-4. **HALLUCINATIONS:** ONLY mention files explicitly listed in the diff headers.
-5. **NO FORMATTING NITS:** DO NOT flag whitespace, comma spacing, or other style issues. The project uses ESLint/Prettier for formatting. Focus only on logic, security, and performance.
+### 📄 `FILE: <file_path>`
 
-### Strict Response Format
-You must respond ONLY using the exact structure below. 
+**🔴 [BLOCKER]**
+<Detailed description of the issue in a clear paragraph.>
 
-FILE: <file_path>
-- [BLOCKER] One-sentence description of the critical bug. Code fix.
-- [SUGGESTION] One-sentence description of the issue. Code fix.
-- [NIT] One-sentence description of styling issue.
+*Suggested Fix:*
+```<language>
+<Code snippet showing the fix>
+```
 
-If there are NO actionable issues across ALL diffs, output exactly:
-LGTM. The changes are clean and follow best practices.
----
-{prompt_payload}
+**🟡 [SUGGESTION]**
+<Detailed description of the issue or optimization.>
+
+*Suggested Fix:*
+```<language>
+<Code snippet>
+```
+
+**🔵 [NIT]**
+<Minor improvement, architecture tip, or best practice.>
+
+If and ONLY if the code is absolutely perfect and you have zero logic, security, or structural suggestions, output exactly:
+[LGTM]
 """
     
     try:
-        logging.info("Sending optimized prompt to Ollama HTTP API...")
+        logging.info("Sending optimized prompt to Ollama...")
+
+        #logging.info(f"========== PAYLOAD TO OLLAMA ==========\n{prompt_payload}\n=======================================")
+
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={
                 "model": OLLAMA_MODEL,
-                "prompt": prompt,
+                "system": system_prompt,
+                "prompt": prompt_payload,
                 "stream": False,
                 "options": {
                     "num_ctx": 8192,
-                    "temperature": 0.0,     # Zero creativity, strict facts only
-                    "num_predict": 800,     # Prevent endless rambling
+                    "temperature": 0.1,
+                    "num_predict": 500, # Зменшено, бо нам не потрібні довгі роздуми
                     "top_p": 0.9
                 }
             },
-            timeout=600 # 10 minute timeout
+            timeout=600
         )
         response.raise_for_status()
-        return response.json().get('response', 'No response from AI.')
+        
+        review_text = response.json().get('response', '').strip()
+        
+        # Якщо модель відповіла тільки LGTM
+        if "[LGTM]" in review_text and "[BLOCKER]" not in review_text and "[SUGGESTION]" not in review_text and "[NIT]" not in review_text:
+             return "LGTM. The changes are clean and follow best practices."
+
+        return review_text
+
     except Exception as e:
         logging.error(f"Error communicating with Ollama: {e}")
         return f"Error communicating with AI Reviewer: {e}"
@@ -159,10 +175,17 @@ def review_merge_request(project_id, mr_iid):
                     # APPLY SURGICAL CONTEXT HERE
                     surgical_context = get_surgical_context(full_file_content, diff)
                     
-                    prompt_payload += f"\n--- FILE: {file_path} (Context Window) ---\n"
-                    prompt_payload += f"```\n{surgical_context}\n```\n"
-                    prompt_payload += f"\n--- DIFF TO REVIEW: {file_path} ---\n"
-                    prompt_payload += f"```diff\n{diff}\n```\n"
+                    # prompt_payload += f"\n--- FILE: {file_path} (Context Window) ---\n"
+                    # prompt_payload += f"```\n{surgical_context}\n```\n"
+                    # prompt_payload += f"\n--- DIFF TO REVIEW: {file_path} ---\n"
+                    # prompt_payload += f"```diff\n{diff}\n```\n"
+                    prompt_payload += f"\n=== START FILE CONTEXT: {file_path} ===\n"
+                    prompt_payload += f"{surgical_context}\n"
+                    prompt_payload += f"=== END FILE CONTEXT ===\n"
+                    
+                    prompt_payload += f"\n=== START DIFF TO REVIEW: {file_path} ===\n"
+                    prompt_payload += f"{diff}\n"
+                    prompt_payload += f"=== END DIFF TO REVIEW ===\n"
                     
                 except Exception as e:
                     logging.warning(f"Fallback: Could not fetch {file_path}. Error: {e}")
