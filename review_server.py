@@ -142,7 +142,7 @@ If and ONLY if the code is absolutely perfect and you have zero logic, security,
         
         # Якщо модель відповіла тільки LGTM
         if "[LGTM]" in review_text and "[BLOCKER]" not in review_text and "[SUGGESTION]" not in review_text and "[NIT]" not in review_text:
-             return "LGTM. The changes are clean and follow best practices."
+            return "LGTM. The changes are clean and follow best practices."
 
         return review_text
 
