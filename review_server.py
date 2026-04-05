@@ -50,6 +50,24 @@ else:
 # ==========================================
 # HELPER FUNCTIONS
 # ==========================================
+def annotate_diff_for_ai(diff_text):
+    """
+    Adds explicit labels to diff lines so the AI doesn't hallucinate 
+    about deleted code still being active.
+    """
+    annotated_lines = []
+    for line in diff_text.splitlines():
+        if line.startswith('---') or line.startswith('+++'):
+            annotated_lines.append(line)
+        elif line.startswith('-'):
+            # Додаємо явний маркер, щоб модель не чіплялася до синтаксису чи неявних змінних
+            annotated_lines.append(line + " // ❌ [THIS LINE WAS DELETED]")
+        elif line.startswith('+'):
+            annotated_lines.append(line + " // ✨ [NEWLY ADDED LINE]")
+        else:
+            annotated_lines.append(line)
+    return "\n".join(annotated_lines)
+    
 def get_surgical_context(full_text, diff_hunk, window=30):
     """
     Extracts multiple context chunks if there are multiple diff hunks.
@@ -80,38 +98,43 @@ def get_surgical_context(full_text, diff_hunk, window=30):
 def get_ollama_review(prompt_payload):
     """Sends the optimized payload to the local Ollama API."""
     
-    system_prompt = """Act as a Principal Software Engineer code reviewer.
+    system_prompt = """Act as a strict Principal Software Engineer code reviewer.
+Your ONLY job is to find logic errors, security vulnerabilities (like SQL injections, XSS), or severe performance bugs in the ADDED (+) or MODIFIED lines.
 
-### CRUCIAL CONSTRAINTS
-1. ONLY analyze the diff provided.
-2. Assume any missing variables/functions are defined elsewhere.
-3. Use Markdown formatting to make your response highly readable (paragraphs, bold text, bullet points, and code blocks).
+### ABSOLUTE BANS (CRITICAL TO OBEY):
+1. NEVER complain about "unused", "undeclared", or "missing" variables, methods, or imports. You only see a fragment of the file; assume they are used elsewhere.
+2. NEVER complain about "duplicated methods" or "duplicate blocks". The diff format repeats context. Ignore it.
+3. NEVER flag code formatting, missing docstrings, naming conventions, or style issues in the analyzed code.
+
+### YOUR FORMATTING RULES:
+1. Use rich Markdown formatting for your response (paragraphs, bold text, bullet points, and code blocks) so it is highly readable in GitLab.
+2. Do NOT add any introductory or concluding remarks (like "Here is the review" or "Hope this helps").
 
 ### RESPONSE FORMAT
-Review the code and output ONLY using this exact structure. Do not add any introductory or concluding remarks.
+Review the code and output ONLY using this exact structure:
 
-### 📄 `FILE: <file_path>`
+### 📄 `<file_path>`
 
 **🔴 [BLOCKER]**
-<Detailed description of the issue in a clear paragraph.>
+<Critical logic failure, app crash risk, or severe security flaw (e.g., exposed credentials, raw SQL injection). Write in clear paragraphs.>
 
-*Suggested Fix:*
+*Fix:*
 ```<language>
-<Code snippet showing the fix>
+<Code fix>
 ```
 
 **🟡 [SUGGESTION]**
-<Detailed description of the issue or optimization.>
+<Important logic bug, unhandled edge case, or N+1 query issue.>
 
-*Suggested Fix:*
+*Fix:*
 ```<language>
 <Code snippet>
 ```
 
 **🔵 [NIT]**
-<Minor improvement, architecture tip, or best practice.>
+<Minor security/resilience improvement ONLY. Use this exclusively for suggesting better data validation, safer SQL handling, or stricter type casting. DO NOT use this for code style, formatting, or unused code.>
 
-If and ONLY if the code is absolutely perfect and you have zero logic, security, or structural suggestions, output exactly:
+If and ONLY if the code has no logic or security issues, output EXACTLY:
 [LGTM]
 """
     
