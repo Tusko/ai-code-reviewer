@@ -74,8 +74,108 @@ This project sets up a local AI Code Review bot that integrates with GitLab Merg
 
 You can change or extend the keyword by editing `review_server.py` if desired.
 
+## Tuning for Mac Mini M4 16 GB
+
+The Flask app talks to **Ollama running on the host** (not in Docker). On 16 GB
+unified memory, **context size is the main cause of hung reviews** — a 12B model
+at 32K context plus a large MR diff will swap-thrash and appear stuck.
+
+### Recommended model + context
+
+| Model | Disk | Safe `OLLAMA_NUM_CTX` on 16 GB |
+|---|---|---|
+| `qwen2.5-coder:7b` | ~5 GB | 8192–16384 |
+| `gemma4:12b-it-qat` | ~7 GB | **8192** (do not use 32K) |
+
+Set in `.env`:
+
+```bash
+OLLAMA_MODEL=gemma4:12b-it-qat   # or qwen2.5-coder:7b
+OLLAMA_NUM_CTX=8192
+OLLAMA_NUM_PREDICT=1024
+CONTEXT_WINDOW=25
+```
+
+After changing context, **unload the model** so Ollama drops the old KV cache:
+
+```bash
+ollama stop gemma4:12b-it-qat
+```
+
+Then recreate the app container:
+
+```bash
+docker compose up -d --force-recreate app
+```
+
+### One-time host setup
+
+```bash
+./scripts/setup-ollama-host.sh
+```
+
+This sets, via `launchctl`:
+
+| Env var | Value | Why |
+|---|---|---|
+| `OLLAMA_FLASH_ATTENTION` | `1` | Required to enable KV cache quantization. |
+| `OLLAMA_KV_CACHE_TYPE` | `q8_0` | Halves KV cache memory. |
+| `OLLAMA_KEEP_ALIVE` | `24h` | Keep model in unified memory between MRs. |
+| `OLLAMA_MAX_LOADED_MODELS` | `1` | Never load a second model concurrently. |
+| `OLLAMA_NUM_PARALLEL` | `1` | Serialize requests at the daemon level. |
+
+After running, **fully quit and relaunch the Ollama app** (or
+`pkill ollama && ollama serve`) so it re-reads the env.
+
+### Recommended Docker Desktop settings
+
+In Docker Desktop → Settings → Resources, **drop the VM memory to 2 GB**.
+The reviewer container only runs Flask; it does not need more. Every GB you
+take back from Docker is a GB the model can use.
+
+### Verify
+
+After restart, pre-warm the model and confirm everything is on GPU:
+
+```bash
+ollama run gemma4:12b-it-qat "ok" </dev/null
+ollama ps
+```
+
+You should see `PROCESSOR=100% GPU` and `CONTEXT=8192` (matching `OLLAMA_NUM_CTX`).
+
+If `PROCESSOR` shows any CPU%, you are OOM. Lower `OLLAMA_NUM_CTX` to 4096,
+run `ollama stop <model>`, or switch to `qwen2.5-coder:7b`.
+
+### Memory budget (gemma4:12b @ 8K context)
+
+| Consumer | Approx. RAM |
+|---|---|
+| macOS baseline | ~3.5 GB |
+| Docker Desktop VM (limit to 2 GB) | ~2.0 GB |
+| Model weights (QAT) | ~7.2 GB |
+| KV cache @ 8K, q8_0 | ~0.8 GB |
+| **Total** | **~13.5 GB** |
+
+At 32K context the same model needs ~3 GB of KV cache alone and will hang on 16 GB.
+
 ## Troubleshooting
 
 *   **Logs:** Check logs with `docker compose logs -f`.
-*   **Ollama:** Ensure the model is pulled (`docker compose exec ollama ollama list`).
+*   **Ollama:** Ensure the model is pulled (`ollama list`).
 *   **Tunnel:** Check Cloudflare dashboard to see if the tunnel is "Healthy".
+*   **Review stuck / never finishes:** Almost always 16 GB memory pressure.
+    Run `ollama ps` — if `CONTEXT` is 32768 or `PROCESSOR` is not `100% GPU`,
+    set `OLLAMA_NUM_CTX=8192` in `.env`, run `ollama stop <model>`, and
+    `docker compose up -d --force-recreate app`. See tuning section above.
+*   **Read timed out:** Ollama is partially CPU-offloaded. Check `ollama ps`.
+*   **Slow first review:** Model cold-load from disk on a 16 GB box can take
+    30–90 s. The `keep_alive: 24h` setting prevents this on subsequent MRs.
+*   **`404 Not Found for url: .../api/chat`:** Ollama is up but the
+    `model` field in the request points at a model that is not currently
+    pulled. Two common causes:
+    1.  You changed `OLLAMA_MODEL` in `.env` but used `docker compose restart`,
+        which does **not** re-read `.env`. Always use
+        `docker compose up -d --force-recreate app` after editing `.env`.
+    2.  The model in `.env` was uninstalled (`ollama rm ...`). Re-pull it
+        or pick another model from `ollama list`.
