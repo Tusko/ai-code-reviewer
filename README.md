@@ -90,11 +90,43 @@ at 32K context plus a large MR diff will swap-thrash and appear stuck.
 Set in `.env`:
 
 ```bash
-OLLAMA_MODEL=gemma4:12b-it-qat   # or qwen2.5-coder:7b
+# The Ollama model to use.
+# 16 GB RAM: prefer qwen2.5-coder:7b (~5 GB) or a 12B QAT build (~7 GB).
+OLLAMA_MODEL=qwen2.5-coder:7b
+OLLAMA_HOST=http://host.docker.internal:11434
+
+# Context and generation limits. Keep num_ctx low on 16 GB to avoid swap thrash.
 OLLAMA_NUM_CTX=8192
-OLLAMA_NUM_PREDICT=1024
-CONTEXT_WINDOW=25
+OLLAMA_NUM_PREDICT=320
+# Metal default. Do not lower this — 128 slows prompt eval 2-4x.
+OLLAMA_NUM_BATCH=512
+
+# Surrounding-file context. Off by default: it roughly doubles input tokens
+# and adds one GitLab file fetch per file, for marginal review quality gain.
+INCLUDE_FILE_CONTEXT=false
+CONTEXT_WINDOW=15
+
+# Deadlines and limits.
+PER_FILE_TIMEOUT_S=90
+MR_TIMEOUT_S=480
+MAX_FILES=40
+QUEUE_MAXSIZE=32
 ```
+
+### How reviews are scheduled
+
+Webhooks return immediately after enqueuing. One background worker drains the
+queue, so only one Ollama request is ever in flight. Repeat webhooks for the
+same MR coalesce into the single queued job, and an MR whose diff has not
+changed since its last review is skipped entirely.
+
+`GET /health` reports `queue_depth`, which is the fastest way to tell whether
+the bot is busy or stuck.
+
+Reviews run one file at a time. Each file gets its own request with a
+`PER_FILE_TIMEOUT_S` deadline, and the whole MR is bounded by `MR_TIMEOUT_S`.
+Files that cannot fit the context budget are named in the summary note rather
+than dropped silently.
 
 After changing context, **unload the model** so Ollama drops the old KV cache:
 
@@ -164,10 +196,10 @@ At 32K context the same model needs ~3 GB of KV cache alone and will hang on 16 
 *   **Logs:** Check logs with `docker compose logs -f`.
 *   **Ollama:** Ensure the model is pulled (`ollama list`).
 *   **Tunnel:** Check Cloudflare dashboard to see if the tunnel is "Healthy".
-*   **Review stuck / never finishes:** Almost always 16 GB memory pressure.
-    Run `ollama ps` — if `CONTEXT` is 32768 or `PROCESSOR` is not `100% GPU`,
-    set `OLLAMA_NUM_CTX=8192` in `.env`, run `ollama stop <model>`, and
-    `docker compose up -d --force-recreate app`. See tuning section above.
+*   **Review stuck / never finishes:** check `curl localhost:5000/health` for
+    `queue_depth`. A depth above zero with no log progress means Ollama is
+    wedged — run `ollama ps` and confirm `PROCESSOR=100% GPU`. Individual files
+    now abort after `PER_FILE_TIMEOUT_S` instead of hanging.
 *   **Read timed out:** Ollama is partially CPU-offloaded. Check `ollama ps`.
 *   **Slow first review:** Model cold-load from disk on a 16 GB box can take
     30–90 s. The `keep_alive: 24h` setting prevents this on subsequent MRs.

@@ -7,6 +7,7 @@ from reviewer import config, gitlab_client, prompt as prompt_mod
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.filters import is_reviewable
 from reviewer.ollama_client import chat
+from reviewer.queue import DedupeCache
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,15 @@ class FileOutcome:
     path: str
     status: str   # "reviewed" | "clean" | "skipped" | "error"
     detail: str
+
+
+dedupe = DedupeCache()
+
+SKIP_BRANCH_PREFIXES = ("release/",)
+
+
+def should_skip_branch(branch: str) -> bool:
+    return any(prefix in (branch or "") for prefix in SKIP_BRANCH_PREFIXES)
 
 
 def select_files(file_diffs: Sequence[FileDiff]) -> tuple[list[FileDiff], list[FileOutcome]]:
@@ -121,7 +131,19 @@ def review_merge_request(project_id: int, mr_iid: int) -> None:
     started = time.monotonic()
     try:
         project, mr = gitlab_client.fetch_mr(project_id, mr_iid)
+
+        if should_skip_branch(getattr(mr, "source_branch", "")):
+            logging.info("MR !%s targets a release branch; skipping", mr_iid)
+            return
+
         file_diffs = gitlab_client.fetch_file_diffs(mr)
+
+        fingerprint = gitlab_client.diff_fingerprint(file_diffs)
+        if dedupe.seen(fingerprint):
+            logging.info("MR !%s diff unchanged since last review; skipping", mr_iid)
+            return
+        dedupe.remember(fingerprint)
+
         kept, outcomes = select_files(file_diffs)
 
         if not kept:
