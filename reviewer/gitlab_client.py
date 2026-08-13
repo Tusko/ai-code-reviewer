@@ -68,21 +68,22 @@ def post_inline(mr, path: str, new_line: int, body: str) -> bool:
     refs = getattr(mr, "diff_refs", None)
     if not refs:
         return False
+
+    # Build position dict outside try so KeyError and AttributeError propagate
+    position = {
+        "base_sha": refs["base_sha"],
+        "start_sha": refs["start_sha"],
+        "head_sha": refs["head_sha"],
+        "position_type": "text",
+        "new_path": path,
+        "old_path": path,
+        "new_line": new_line,
+    }
+
     try:
-        mr.discussions.create({
-            "body": body,
-            "position": {
-                "base_sha": refs["base_sha"],
-                "start_sha": refs["start_sha"],
-                "head_sha": refs["head_sha"],
-                "position_type": "text",
-                "new_path": path,
-                "old_path": path,
-                "new_line": new_line,
-            },
-        })
+        mr.discussions.create({"body": body, "position": position})
         return True
-    except Exception as exc:
+    except gitlab.exceptions.GitlabError as exc:
         logging.info("Inline discussion rejected for %s:%s (%s)", path, new_line, exc)
         return False
 
@@ -96,8 +97,12 @@ def diff_fingerprint(file_diffs: Sequence[FileDiff]) -> str:
     digest = hashlib.sha256()
     for fd in file_diffs:
         digest.update(fd.new_path.encode())
+        digest.update(b"\x00")
         for hunk in fd.hunks:
             digest.update(str(hunk.new_start).encode())
+            digest.update(b"\x00")
             for line in hunk.lines:
                 digest.update(line.encode())
+                digest.update(b"\x00")
+        digest.update(b"\x00")
     return digest.hexdigest()

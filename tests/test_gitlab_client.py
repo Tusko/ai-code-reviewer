@@ -1,4 +1,5 @@
 import pytest
+import gitlab.exceptions
 
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.gitlab_client import (
@@ -16,7 +17,7 @@ class FakeDiscussions:
 
     def create(self, payload):
         if self.fail:
-            raise RuntimeError("400 Bad Request")
+            raise gitlab.exceptions.GitlabError("400 Bad Request")
         self.created.append(payload)
 
 
@@ -99,3 +100,18 @@ def test_diff_fingerprint_is_stable_and_content_sensitive():
                      (Hunk(1, 5, (" a", "+c")),))
     assert a == b
     assert diff_fingerprint([other]) != a
+
+
+def test_diff_fingerprint_distinguishes_path_and_line_boundaries():
+    # Regression test for hash collision bug:
+    # Without delimiters, "x1" + "2 a" and "x" + "12 a" both hash the same.
+    a = FileDiff('x1', 'x1', False, False, False, False, (Hunk(1, 2, (' a',)),))
+    b = FileDiff('x', 'x', False, False, False, False, (Hunk(1, 12, (' a',)),))
+    assert diff_fingerprint([a]) != diff_fingerprint([b])
+
+
+def test_post_inline_propagates_malformed_diff_refs():
+    mr = FakeMR()
+    del mr.diff_refs["head_sha"]
+    with pytest.raises(KeyError):
+        post_inline(mr, "src/a.py", 42, "body")
