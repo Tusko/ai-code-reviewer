@@ -23,7 +23,8 @@ SKIP_BRANCH_PREFIXES = ("release/",)
 
 
 def should_skip_branch(branch: str) -> bool:
-    return any(prefix in (branch or "") for prefix in SKIP_BRANCH_PREFIXES)
+    branch = branch or ""
+    return any(branch.startswith(prefix) for prefix in SKIP_BRANCH_PREFIXES)
 
 
 def select_files(file_diffs: Sequence[FileDiff]) -> tuple[list[FileDiff], list[FileOutcome]]:
@@ -142,13 +143,13 @@ def review_merge_request(project_id: int, mr_iid: int) -> None:
         if dedupe.seen(fingerprint):
             logging.info("MR !%s diff unchanged since last review; skipping", mr_iid)
             return
-        dedupe.remember(fingerprint)
 
         kept, outcomes = select_files(file_diffs)
 
         if not kept:
             logging.info("MR !%s: nothing reviewable", mr_iid)
             gitlab_client.post_note(mr, render_summary(outcomes))
+            dedupe.remember(fingerprint)
             return
 
         for file_diff in kept:
@@ -176,6 +177,7 @@ def review_merge_request(project_id: int, mr_iid: int) -> None:
                 outcomes.append(FileOutcome(file_diff.new_path, "error", str(exc)[:120]))
 
         gitlab_client.post_note(mr, render_summary(outcomes))
+        dedupe.remember(fingerprint)
         logging.info("MR !%s reviewed in %.1fs", mr_iid, time.monotonic() - started)
 
     except Exception as exc:

@@ -18,6 +18,7 @@ services:
       - MR_TIMEOUT_S=${MR_TIMEOUT_S:-480}
       - MAX_FILES=${MAX_FILES:-40}
       - QUEUE_MAXSIZE=${QUEUE_MAXSIZE:-32}
+      - DEDUPE_CACHE_SIZE=${DEDUPE_CACHE_SIZE:-256}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always
