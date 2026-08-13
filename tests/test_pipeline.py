@@ -127,6 +127,30 @@ def test_review_file_reports_error_on_timeout(monkeypatch):
     assert "timeout" in outcome.detail
 
 
+def test_review_file_reports_error_on_incomplete_stream(monkeypatch):
+    # C1 regression: an interrupted stream (no terminal payload) must never
+    # be reported as "clean" — an absence of signal is not a positive result.
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result("", done_reason="incomplete"),
+    )
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+    assert outcome.status == "error"
+    assert outcome.detail == "no response from model"
+
+
+def test_review_file_reports_error_on_empty_response(monkeypatch):
+    # C1 regression: done_reason == "stop" with empty text is also an absence
+    # of signal, not a clean verdict.
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result("", done_reason="stop"),
+    )
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+    assert outcome.status == "error"
+    assert outcome.detail == "no response from model"
+
+
 def test_review_file_is_clean_when_response_starts_with_lgtm(monkeypatch):
     monkeypatch.setattr(
         pipeline, "chat",
@@ -206,6 +230,27 @@ def test_review_file_marks_truncated_response_but_still_posts(monkeypatch):
     assert len(note_calls) == 1
     assert ("_⚠️ This review was truncated at the output token limit "
             "and may be incomplete._") in note_calls[0]
+
+
+def test_review_file_reports_partial_l2_coverage_when_hunk_exceeds_budget(monkeypatch):
+    # I3 regression: at L2, hunks that don't fit must be named in the outcome
+    # detail rather than silently vanishing.
+    ladder = [("L1", "l1-text"), ("L2", "hunk1-text"), ("L2", "hunk2-text")]
+    monkeypatch.setattr(pipeline, "build_prompt_ladder", lambda path, hunks, context: ladder)
+    monkeypatch.setattr(pipeline.prompt_mod, "fits",
+                         lambda text: text in ("hunk1-text",))
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result("**🔴 [BLOCKER]**\nbad"),
+    )
+    monkeypatch.setattr(pipeline.gitlab_client, "post_inline", lambda *a, **k: True)
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note", lambda *a, **k: None)
+
+    two_hunks = (Hunk(1, 1, (" x", "+y")), Hunk(1, 40, (" z", "+w")))
+    outcome = review_file(FakeMR(), fd("a.py", hunks=two_hunks), context="")
+
+    assert outcome.status == "reviewed"
+    assert outcome.detail == "1 of 2 hunks reviewed; 1 hunk exceeds context budget"
 
 
 def test_review_merge_request_marks_all_files_skipped_when_deadline_passed(monkeypatch):

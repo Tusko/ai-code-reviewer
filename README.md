@@ -35,30 +35,14 @@ This project sets up a local AI Code Review bot that integrates with GitLab Merg
     ```
 
 6.  **Pull the AI Model:**
-    Wait for the containers to start, then run:
+    Ollama runs on the **host**, not in Docker (see "Tuning for Mac Mini M4
+    16 GB" below), so pull it there directly:
     ```bash
-    docker compose exec ollama ollama pull codellama
+    ollama pull qwen2.5-coder:7b
     ```
-    (You can swap `codellama` for `llama3`, `mistral`, etc., in `.env` and here).
-
-    Using qwen2.5-coder
-    -------------------
-    If you want to use the `qwen2.5-coder:7b-instruct-q4_K_M` model, set the `OLLAMA_MODEL` value in your `.env` file:
-
-    ```dotenv
-    OLLAMA_MODEL=qwen2.5-coder:7b-instruct-q4_K_M
-    ```
-
-    Then pull that model inside the `ollama` container:
-
-    ```bash
-    docker compose exec ollama ollama pull qwen2.5-coder:7b-instruct-q4_K_M
-    ```
-
-    Notes:
-    - The model string may include quantization or "instruct" suffixes — keep the exact name in `.env`.
-    - After pulling, the service will use the model referenced by `OLLAMA_MODEL` when handling reviews.
-    - Start or restart the services if you change `.env` so the new model name is picked up.
+    This matches the model recommended in the tuning section and the
+    `OLLAMA_MODEL` default. If you use a different model, set `OLLAMA_MODEL`
+    in `.env` to match and re-pull under that exact name.
 
 7.  **Configure GitLab Webhook:**
     *   Go to your GitLab Project > **Settings > Webhooks**.
@@ -73,6 +57,23 @@ This project sets up a local AI Code Review bot that integrates with GitLab Merg
 - **Manual trigger via comment:** Post a comment containing `/review` (case-insensitive) on any MR. The bot will fetch the current diff and post its AI review again.
 
 You can change or extend the keyword by editing `review_server.py` if desired.
+
+## Upgrading from an earlier version
+
+`docker-compose.yml` reads tuning values from `.env` with fallback defaults
+(`${OLLAMA_NUM_PREDICT:-320}`), so an existing `.env` from before this refactor
+keeps its old values and silently overrides the new, faster defaults — you
+upgrade, see none of the intended speedup, and nothing tells you why. If your
+`.env` predates this change:
+
+1.  Delete `MAX_PROMPT_CHARS` and `MIN_OUTPUT_TOKENS` from `.env` — both keys
+    no longer exist and are ignored.
+2.  Set `OLLAMA_NUM_PREDICT=320` and `CONTEXT_WINDOW=15`.
+3.  Add `OLLAMA_NUM_BATCH=512`.
+4.  Recreate the app container so the new values take effect:
+    ```bash
+    docker compose up -d --build --force-recreate app
+    ```
 
 ## Tuning for Mac Mini M4 16 GB
 

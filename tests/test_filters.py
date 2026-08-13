@@ -107,3 +107,14 @@ def test_lookalike_paths_are_not_skipped(path):
     # 'migrations' stays reviewable: raw SQL is exactly what we want reviewed.
     # Substring matches like 'distance' must not trip the 'dist/' rule.
     assert is_reviewable(make(path)) == (True, "")
+
+
+def test_deletion_only_file_is_skipped():
+    # I4 regression: a file whose change is purely removals has zero '+'
+    # lines once removed lines are stripped from the prompt, costing a full
+    # inference for nothing — and select_files sorts it first since
+    # total_lines (added-only) is 0.
+    deletion_only = Hunk(old_start=1, new_start=1, lines=(" keep", "-removed"))
+    ok, reason = is_reviewable(make("src/app.py", hunks=(deletion_only,)))
+    assert ok is False
+    assert reason == "no added lines"

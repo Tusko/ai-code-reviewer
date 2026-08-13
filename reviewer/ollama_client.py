@@ -24,7 +24,7 @@ class ChatResult:
 
     @property
     def truncated(self) -> bool:
-        return self.done_reason in ("length", "timeout")
+        return self.done_reason in ("length", "timeout", "incomplete")
 
     @property
     def failed(self) -> bool:
@@ -98,6 +98,12 @@ def chat(system: str, user: str, deadline_s: int) -> ChatResult:
                 prompt_eval = obj.get("prompt_eval_count") or 0
                 eval_count = obj.get("eval_count") or 0
                 break
+
+        if done_reason == "incomplete":
+            logging.warning(
+                "Ollama stream ended with no terminal payload (connection closed "
+                "early, daemon restart, or OOM); treating as incomplete",
+            )
 
     except Exception as exc:
         logging.error("Error communicating with Ollama: %s", exc)

@@ -175,7 +175,13 @@ point, at the cost of roughly doubled input tokens and one extra GitLab file
 fetch per file. L0 also requires fetching full file content, so with the
 default off, the GitLab file-content fetches disappear entirely.
 
-Budget per file: approximately 1500 input tokens, 320 output tokens.
+Budget per file: the entire remaining context window after the system prompt
+and output reservation — `input_token_budget()` returns about 7119 input
+tokens with the shipped defaults (`OLLAMA_NUM_CTX=8192`,
+`OLLAMA_NUM_PREDICT=320`), not the ~1500 tokens originally estimated here.
+Consequence: L2 and L3 are reached only by genuinely enormous single files or
+hunks, and one large file can consume a near-full-context prompt evaluation
+by itself, at the expense of files queued behind it.
 
 ### Prompt construction
 

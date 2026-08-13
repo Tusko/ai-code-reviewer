@@ -63,6 +63,34 @@ def test_changed_diff_is_reviewed_again(monkeypatch):
     assert len(calls) == 2
 
 
+def test_forced_review_runs_even_when_fingerprint_cached(monkeypatch):
+    calls = []
+    review_calls = []
+    mr = FakeMR()
+
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), mr))
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_file_diffs", lambda m: [FD])
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
+                        lambda m, body: calls.append(body))
+
+    def fake_review_file(mr_, fd, ctx):
+        review_calls.append(fd.new_path)
+        return pipeline.FileOutcome(fd.new_path, "clean", "")
+
+    monkeypatch.setattr(pipeline, "review_file", fake_review_file)
+    monkeypatch.setattr(pipeline, "dedupe", pipeline.DedupeCache(maxsize=8))
+
+    pipeline.review_merge_request(1, 1)
+    assert len(review_calls) == 1
+    assert len(calls) == 1
+
+    # Same diff, dedupe would normally skip it — force=True (manual /review) must
+    # bypass the dedupe gate and re-run.
+    pipeline.review_merge_request(1, 1, force=True)
+    assert len(review_calls) == 2
+    assert len(calls) == 2
+
+
 def test_failed_review_does_not_suppress_retry(monkeypatch):
     calls = []
     review_calls = []

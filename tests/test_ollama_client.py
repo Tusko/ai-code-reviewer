@@ -73,6 +73,20 @@ def test_length_done_reason_is_truncated(monkeypatch):
     assert result.truncated is True
 
 
+def test_stream_with_no_terminal_payload_is_incomplete(monkeypatch):
+    # C1 regression: connection ends (OOM-killed model, host sleep, daemon
+    # restart, proxy reset) without ever sending {"done": true}. iter_lines()
+    # just stops — no exception. This must not be mistaken for a clean result.
+    payloads = [{"message": {"content": c}, "done": False} for c in ["par", "tial"]]
+    monkeypatch.setattr(
+        "reviewer.ollama_client.requests.post",
+        lambda *a, **kw: FakeResponse(payloads),
+    )
+    result = chat("sys", "user", deadline_s=30)
+    assert result.done_reason == "incomplete"
+    assert result.truncated is True
+
+
 def test_deadline_aborts_and_closes_connection(monkeypatch):
     clock = {"t": 0.0}
 

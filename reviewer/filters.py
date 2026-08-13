@@ -52,4 +52,7 @@ def is_reviewable(file_diff: FileDiff) -> tuple[bool, str]:
     if path.endswith(ASSET_SUFFIXES):
         return False, "asset"
 
+    if file_diff.total_lines == 0:
+        return False, "no added lines"
+
     return True, ""

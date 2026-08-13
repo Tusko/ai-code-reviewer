@@ -92,9 +92,20 @@ def post_note(mr, body: str) -> None:
     mr.notes.create({"body": body})
 
 
-def diff_fingerprint(file_diffs: Sequence[FileDiff]) -> str:
-    """Stable hash of all diff content, used for dedupe."""
+def diff_fingerprint(project_id: int, mr_iid: int, file_diffs: Sequence[FileDiff]) -> str:
+    """Stable hash of project + MR identity and diff content, used for dedupe.
+
+    DedupeCache is a single process-wide instance shared across every project
+    the bot serves, so project_id and mr_iid must be part of the digest —
+    otherwise two merge requests with byte-identical diffs (backports,
+    cross-project cherry-picks, a re-created MR) collide and the second is
+    silently skipped.
+    """
     digest = hashlib.sha256()
+    digest.update(str(project_id).encode())
+    digest.update(b"\x00")
+    digest.update(str(mr_iid).encode())
+    digest.update(b"\x00")
     for fd in file_diffs:
         digest.update(fd.new_path.encode())
         digest.update(b"\x00")

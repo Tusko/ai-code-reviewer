@@ -1,5 +1,25 @@
 import importlib
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_module_after_test():
+    """Undoes the module-level mutation importlib.reload() leaves behind.
+
+    monkeypatch.setenv is undone at test teardown, but the already-reloaded
+    reviewer.config module is not automatically reloaded back — so without
+    this, every test file that runs after this one would see whatever env
+    override the last test here happened to apply (e.g. OLLAMA_NUM_CTX=4096).
+    This fixture is set up before each test's own monkeypatch fixture (both
+    are function-scoped, and this one is autouse) and so is torn down after
+    it, once monkeypatch has already restored the real environment — the
+    reload here then picks up the clean environment.
+    """
+    yield
+    import reviewer.config
+    importlib.reload(reviewer.config)
+
 
 def _reload(monkeypatch, **env):
     for key, value in env.items():

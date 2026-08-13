@@ -94,12 +94,12 @@ def test_fetch_file_content_returns_empty_on_error():
 
 
 def test_diff_fingerprint_is_stable_and_content_sensitive():
-    a = diff_fingerprint([FD])
-    b = diff_fingerprint([FD])
+    a = diff_fingerprint(1, 1, [FD])
+    b = diff_fingerprint(1, 1, [FD])
     other = FileDiff("x.py", "x.py", False, False, False, False,
                      (Hunk(1, 5, (" a", "+c")),))
     assert a == b
-    assert diff_fingerprint([other]) != a
+    assert diff_fingerprint(1, 1, [other]) != a
 
 
 def test_diff_fingerprint_distinguishes_path_and_line_boundaries():
@@ -107,7 +107,16 @@ def test_diff_fingerprint_distinguishes_path_and_line_boundaries():
     # Without delimiters, "x1" + "2 a" and "x" + "12 a" both hash the same.
     a = FileDiff('x1', 'x1', False, False, False, False, (Hunk(1, 2, (' a',)),))
     b = FileDiff('x', 'x', False, False, False, False, (Hunk(1, 12, (' a',)),))
-    assert diff_fingerprint([a]) != diff_fingerprint([b])
+    assert diff_fingerprint(1, 1, [a]) != diff_fingerprint(1, 1, [b])
+
+
+def test_diff_fingerprint_distinguishes_project_and_mr_identity():
+    # I1 regression: DedupeCache is a single process-wide instance shared
+    # across every project the bot serves. Two merge requests with
+    # byte-identical diffs (backports, cross-project cherry-picks, a
+    # re-created MR) must not collide.
+    assert diff_fingerprint(1, 1, [FD]) != diff_fingerprint(2, 1, [FD])
+    assert diff_fingerprint(1, 1, [FD]) != diff_fingerprint(1, 2, [FD])
 
 
 def test_post_inline_propagates_malformed_diff_refs():

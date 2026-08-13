@@ -71,6 +71,21 @@ def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
     chosen_level = attempts[0][0]
     prompts = [text for level, text in attempts if level == chosen_level]
 
+    # L2 hunk-prompts can individually fail to fit; the ladder's guarantee is
+    # that no level is silent, so any dropped hunks must be named here.
+    l2_detail = ""
+    if chosen_level == "L2":
+        total_l2 = sum(1 for level, _ in ladder if level == "L2")
+        fit_l2 = len(prompts)
+        missing = total_l2 - fit_l2
+        if missing:
+            hunk_word = "hunk" if missing == 1 else "hunks"
+            verb = "exceeds" if missing == 1 else "exceed"
+            l2_detail = (
+                f"{fit_l2} of {total_l2} hunks reviewed; "
+                f"{missing} {hunk_word} {verb} context budget"
+            )
+
     bodies: list[str] = []
     truncated = False
     for text in prompts:
@@ -79,13 +94,19 @@ def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
             return FileOutcome(path, "error", result.done_reason)
         if result.done_reason == "timeout":
             return FileOutcome(path, "error", f"timeout after {config.PER_FILE_TIMEOUT_S}s")
+        if result.done_reason == "incomplete":
+            # Stream ended with no terminal payload. An absence of signal must
+            # never render as a positive (clean) result.
+            return FileOutcome(path, "error", "no response from model")
+        if not result.text and result.done_reason == "stop":
+            return FileOutcome(path, "error", "no response from model")
         if result.done_reason == "length":
             truncated = True
         if result.text and not result.text.startswith("LGTM."):
             bodies.append(result.text)
 
     if not bodies:
-        return FileOutcome(path, "clean", "")
+        return FileOutcome(path, "clean", l2_detail)
 
     body = f"### 📄 `{path}`\n\n" + "\n\n".join(bodies)
     if truncated:
@@ -97,7 +118,7 @@ def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
     if not posted:
         gitlab_client.post_note(mr, body)
 
-    detail = f"{len(bodies)} response(s)"
+    detail = l2_detail if l2_detail else f"{len(bodies)} response(s)"
     if truncated:
         detail += ", truncated at output token limit"
     return FileOutcome(path, "reviewed", detail)
@@ -128,7 +149,7 @@ def render_summary(outcomes: Sequence[FileOutcome]) -> str:
     return "\n".join(lines)
 
 
-def review_merge_request(project_id: int, mr_iid: int) -> None:
+def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> None:
     started = time.monotonic()
     try:
         project, mr = gitlab_client.fetch_mr(project_id, mr_iid)
@@ -139,8 +160,8 @@ def review_merge_request(project_id: int, mr_iid: int) -> None:
 
         file_diffs = gitlab_client.fetch_file_diffs(mr)
 
-        fingerprint = gitlab_client.diff_fingerprint(file_diffs)
-        if dedupe.seen(fingerprint):
+        fingerprint = gitlab_client.diff_fingerprint(project_id, mr_iid, file_diffs)
+        if not force and dedupe.seen(fingerprint):
             logging.info("MR !%s diff unchanged since last review; skipping", mr_iid)
             return
 

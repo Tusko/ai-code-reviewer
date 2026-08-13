@@ -20,15 +20,20 @@ logging.info(
 
 
 def _handle(job: tuple) -> None:
-    project_id, mr_iid = job
-    review_merge_request(project_id, mr_iid)
+    project_id, mr_iid, force = job
+    review_merge_request(project_id, mr_iid, force=force)
 
 
 review_queue = start_worker(_handle)
 
 
-def should_review(event_type: str, data: dict) -> tuple[int, int] | None:
-    """Returns (project_id, mr_iid) if this event warrants a review, else None."""
+def should_review(event_type: str, data: dict) -> tuple[int, int, bool] | None:
+    """Returns (project_id, mr_iid, force) if this event warrants a review, else None.
+
+    force is True for a manual '/review' comment, which must re-run even
+    though the diff itself is by definition unchanged. It is False for the
+    automatic Merge Request Hook paths, which defer to the dedupe cache.
+    """
     attrs = data.get("object_attributes", {})
 
     if event_type == "Note Hook":
@@ -36,16 +41,16 @@ def should_review(event_type: str, data: dict) -> tuple[int, int] | None:
             return None
         if "/review" not in (attrs.get("note") or "").lower():
             return None
-        return data["project"]["id"], data["merge_request"]["iid"]
+        return data["project"]["id"], data["merge_request"]["iid"], True
 
     if event_type == "Merge Request Hook":
         action = attrs.get("action")
         if action in ("open", "reopen"):
-            return data["project"]["id"], attrs["iid"]
+            return data["project"]["id"], attrs["iid"], False
         # 'update' fires on title, description and label edits too. GitLab sets
         # oldrev only when new commits arrived, so it is our new-commits signal.
         if action == "update" and attrs.get("oldrev"):
-            return data["project"]["id"], attrs["iid"]
+            return data["project"]["id"], attrs["iid"], False
         return None
 
     return None
@@ -61,8 +66,8 @@ def webhook():
     if not target:
         return jsonify({"message": "Ignored event"}), 200
 
-    project_id, mr_iid = target
-    if review_queue.submit(f"{project_id}:{mr_iid}", (project_id, mr_iid)):
+    project_id, mr_iid, force = target
+    if review_queue.submit(f"{project_id}:{mr_iid}", (project_id, mr_iid, force)):
         return jsonify({"message": "Review queued", "depth": review_queue.size()}), 202
     return jsonify({"error": "Review queue full"}), 503
 

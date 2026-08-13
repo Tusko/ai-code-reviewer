@@ -22,15 +22,15 @@ def _mr_hook(action, oldrev=None):
 
 
 def test_open_action_is_reviewed():
-    assert should_review("Merge Request Hook", _mr_hook("open")) == (3, 7)
+    assert should_review("Merge Request Hook", _mr_hook("open")) == (3, 7, False)
 
 
 def test_reopen_action_is_reviewed():
-    assert should_review("Merge Request Hook", _mr_hook("reopen")) == (3, 7)
+    assert should_review("Merge Request Hook", _mr_hook("reopen")) == (3, 7, False)
 
 
 def test_update_with_new_commits_is_reviewed():
-    assert should_review("Merge Request Hook", _mr_hook("update", oldrev="abc123")) == (3, 7)
+    assert should_review("Merge Request Hook", _mr_hook("update", oldrev="abc123")) == (3, 7, False)
 
 
 def test_update_without_oldrev_is_ignored():
@@ -48,7 +48,7 @@ def test_review_comment_triggers_review():
         "merge_request": {"iid": 7},
         "object_attributes": {"noteable_type": "MergeRequest", "note": "please /review this"},
     }
-    assert should_review("Note Hook", data) == (3, 7)
+    assert should_review("Note Hook", data) == (3, 7, True)
 
 
 def test_unrelated_comment_is_ignored():
@@ -81,7 +81,7 @@ def test_webhook_enqueues_and_returns_202(client, monkeypatch):
     resp = client.post("/webhook", json=_mr_hook("open"),
                        headers={"X-Gitlab-Token": "s3cret", "X-Gitlab-Event": "Merge Request Hook"})
     assert resp.status_code == 202
-    assert submitted[0][1] == (3, 7)
+    assert submitted[0][1] == (3, 7, False)
 
 
 def test_webhook_returns_503_when_queue_full(client, monkeypatch):
