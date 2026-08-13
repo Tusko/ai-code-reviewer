@@ -1,8 +1,11 @@
 import pytest
 
+from reviewer import pipeline
 from reviewer.diff_parser import FileDiff, Hunk
+from reviewer.ollama_client import ChatResult
 from reviewer.pipeline import (
-    FileOutcome, build_prompt_ladder, render_summary, select_files,
+    FileOutcome, build_prompt_ladder, render_summary, review_file,
+    review_merge_request, select_files,
 )
 
 
@@ -15,6 +18,19 @@ def fd(path, added=1, **kwargs):
         is_renamed=False,
         is_binary=kwargs.get("is_binary", False),
         hunks=kwargs.get("hunks", (Hunk(1, 1, tuple(lines)),)),
+    )
+
+
+class FakeMR:
+    """Placeholder MR object. review_file never reads its attributes directly —
+    gitlab_client calls that would need them (post_inline, post_note) are mocked
+    out in the tests below."""
+
+
+def _chat_result(text, done_reason="stop"):
+    return ChatResult(
+        text=text, done_reason=done_reason,
+        prompt_eval_count=0, eval_count=0, elapsed_s=0.1,
     )
 
 
@@ -83,3 +99,137 @@ def test_render_summary_lists_every_category():
 def test_render_summary_of_all_clean_says_lgtm():
     summary = render_summary([FileOutcome("a.py", "clean", "")])
     assert "LGTM" in summary
+
+
+def test_review_file_skips_when_no_ladder_level_fits(monkeypatch):
+    monkeypatch.setattr(pipeline.prompt_mod, "fits", lambda text: False)
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+    assert outcome.status == "skipped"
+    assert outcome.detail
+
+
+def test_review_file_reports_error_on_chat_failure(monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result("boom", done_reason="error"),
+    )
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+    assert outcome.status == "error"
+
+
+def test_review_file_reports_error_on_timeout(monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result("partial", done_reason="timeout"),
+    )
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+    assert outcome.status == "error"
+    assert "timeout" in outcome.detail
+
+
+def test_review_file_is_clean_when_response_starts_with_lgtm(monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result("LGTM. Looks fine."),
+    )
+    inline_calls = []
+    note_calls = []
+    monkeypatch.setattr(pipeline.gitlab_client, "post_inline",
+                         lambda *a, **k: inline_calls.append((a, k)) or True)
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
+                         lambda *a, **k: note_calls.append((a, k)))
+
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+
+    assert outcome.status == "clean"
+    assert inline_calls == []
+    assert note_calls == []
+
+
+def test_review_file_posts_inline_when_finding_and_position_accepted(monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result("**🔴 [BLOCKER]**\nSomething bad."),
+    )
+    inline_calls = []
+    note_calls = []
+    monkeypatch.setattr(pipeline.gitlab_client, "post_inline",
+                         lambda mr, path, line, body: inline_calls.append((mr, path, line, body)) or True)
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
+                         lambda mr, body: note_calls.append((mr, body)))
+
+    file_diff = fd("a.py")
+    outcome = review_file(FakeMR(), file_diff, context="")
+
+    assert outcome.status == "reviewed"
+    assert len(inline_calls) == 1
+    assert inline_calls[0][2] == file_diff.hunks[0].first_added_line()
+    assert note_calls == []
+
+
+def test_review_file_falls_back_to_note_when_inline_rejected(monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result("**🔴 [BLOCKER]**\nSomething bad."),
+    )
+    inline_calls = []
+    note_calls = []
+    monkeypatch.setattr(pipeline.gitlab_client, "post_inline",
+                         lambda mr, path, line, body: inline_calls.append((mr, path, line, body)) or False)
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
+                         lambda mr, body: note_calls.append((mr, body)))
+
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+
+    assert outcome.status == "reviewed"
+    assert len(inline_calls) == 1
+    assert len(note_calls) == 1
+    assert note_calls[0][1] == inline_calls[0][3]
+
+
+def test_review_file_marks_truncated_response_but_still_posts(monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result(
+            "**🔴 [BLOCKER]**\nSomething bad but cut off", done_reason="length",
+        ),
+    )
+    note_calls = []
+    monkeypatch.setattr(pipeline.gitlab_client, "post_inline", lambda *a, **k: False)
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
+                         lambda mr, body: note_calls.append(body))
+
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+
+    assert outcome.status == "reviewed"
+    assert "truncated" in outcome.detail
+    assert len(note_calls) == 1
+    assert ("_⚠️ This review was truncated at the output token limit "
+            "and may be incomplete._") in note_calls[0]
+
+
+def test_review_merge_request_marks_all_files_skipped_when_deadline_passed(monkeypatch):
+    monkeypatch.setattr(pipeline.config, "MR_TIMEOUT_S", 0)
+
+    mr = FakeMR()
+    project = object()
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr",
+                         lambda project_id, mr_iid: (project, mr))
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_file_diffs",
+                         lambda mr: [fd("a.py"), fd("b.py")])
+
+    posted = []
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
+                         lambda mr, body: posted.append(body))
+
+    def fail_review_file(mr, file_diff, context):
+        raise AssertionError("review_file should not run once the MR deadline has passed")
+    monkeypatch.setattr(pipeline, "review_file", fail_review_file)
+
+    review_merge_request(project_id=1, mr_iid=2)
+
+    assert len(posted) == 1
+    summary = posted[0]
+    assert "a.py" in summary
+    assert "b.py" in summary
+    assert summary.count("MR deadline of 0s reached") == 2

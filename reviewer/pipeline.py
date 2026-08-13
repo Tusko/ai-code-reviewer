@@ -61,12 +61,15 @@ def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
     prompts = [text for level, text in attempts if level == chosen_level]
 
     bodies: list[str] = []
+    truncated = False
     for text in prompts:
         result = chat(prompt_mod.SYSTEM_PROMPT, text, deadline_s=config.PER_FILE_TIMEOUT_S)
         if result.failed:
             return FileOutcome(path, "error", result.done_reason)
         if result.done_reason == "timeout":
             return FileOutcome(path, "error", f"timeout after {config.PER_FILE_TIMEOUT_S}s")
+        if result.done_reason == "length":
+            truncated = True
         if result.text and not result.text.startswith("LGTM."):
             bodies.append(result.text)
 
@@ -74,6 +77,8 @@ def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
         return FileOutcome(path, "clean", "")
 
     body = f"### 📄 `{path}`\n\n" + "\n\n".join(bodies)
+    if truncated:
+        body += "\n\n_⚠️ This review was truncated at the output token limit and may be incomplete._"
     anchor = file_diff.hunks[0].first_added_line()
     posted = False
     if anchor is not None:
@@ -81,7 +86,10 @@ def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
     if not posted:
         gitlab_client.post_note(mr, body)
 
-    return FileOutcome(path, "reviewed", f"{len(bodies)} response(s)")
+    detail = f"{len(bodies)} response(s)"
+    if truncated:
+        detail += ", truncated at output token limit"
+    return FileOutcome(path, "reviewed", detail)
 
 
 def render_summary(outcomes: Sequence[FileOutcome]) -> str:
