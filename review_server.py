@@ -67,7 +67,7 @@ OLLAMA_NUM_CTX = int(os.environ.get('OLLAMA_NUM_CTX', '8192'))
 OLLAMA_NUM_PREDICT = int(os.environ.get('OLLAMA_NUM_PREDICT', '500'))
 CONTEXT_WINDOW = int(os.environ.get('CONTEXT_WINDOW', '25'))
 # Upper bound on user payload; effective cap is also derived from num_ctx − num_predict.
-MAX_PROMPT_CHARS = int(os.environ.get('MAX_PROMPT_CHARS', '25000'))
+MAX_PROMPT_CHARS = int(os.environ.get('MAX_PROMPT_CHARS', '120000'))
 # Reserve tokens so input + output fit inside num_ctx (avoids eval≈8 cutoffs).
 PROMPT_TOKEN_BUFFER = int(os.environ.get('PROMPT_TOKEN_BUFFER', '128'))
 MIN_OUTPUT_TOKENS = int(os.environ.get('MIN_OUTPUT_TOKENS', '30'))
