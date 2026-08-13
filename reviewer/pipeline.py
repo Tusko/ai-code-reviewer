@@ -19,7 +19,7 @@ class FileOutcome:
 
 dedupe = DedupeCache()
 
-SKIP_BRANCH_PREFIXES = ("release/",)
+SKIP_BRANCH_PREFIXES = ("release/", "hotfix/")
 
 
 def should_skip_branch(branch: str) -> bool:
@@ -155,7 +155,7 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
         project, mr = gitlab_client.fetch_mr(project_id, mr_iid)
 
         if should_skip_branch(getattr(mr, "source_branch", "")):
-            logging.info("MR !%s targets a release branch; skipping", mr_iid)
+            logging.info("MR !%s source branch is release/ or hotfix/; skipping", mr_iid)
             return
 
         file_diffs = gitlab_client.fetch_file_diffs(mr)

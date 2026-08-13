@@ -14,14 +14,15 @@ class FakeMR:
         return {"changes": []}
 
 
-def test_release_branches_are_skipped():
+def test_release_and_hotfix_branches_are_skipped():
     assert pipeline.should_skip_branch("release/2026.08") is True
+    assert pipeline.should_skip_branch("hotfix/urgent-fix") is True
     assert pipeline.should_skip_branch("feature/x") is False
     assert pipeline.should_skip_branch("") is False
     # Prefix match only — "release/" appearing mid-branch-name must not trigger.
     assert pipeline.should_skip_branch("feature/prerelease/fix") is False
     assert pipeline.should_skip_branch("chore/prerelease/beta") is False
-    assert pipeline.should_skip_branch("hotfix/release/patch") is False
+    assert pipeline.should_skip_branch("hotfix/release/patch") is True
 
 
 def test_identical_diff_is_reviewed_once(monkeypatch):
@@ -118,15 +119,18 @@ def test_failed_review_does_not_suppress_retry(monkeypatch):
     assert len(review_calls) == 2
 
 
-def test_release_branch_mr_posts_nothing(monkeypatch):
+def test_skipped_branch_mr_posts_nothing(monkeypatch):
     calls = []
-    mr = FakeMR(branch="release/2026.08")
-
-    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), mr))
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), FakeMR(branch="release/2026.08")))
     monkeypatch.setattr(pipeline.gitlab_client, "fetch_file_diffs", lambda m: [FD])
     monkeypatch.setattr(pipeline.gitlab_client, "post_note",
                         lambda m, body: calls.append(body))
     monkeypatch.setattr(pipeline, "dedupe", pipeline.DedupeCache(maxsize=8))
 
     pipeline.review_merge_request(1, 1)
+    assert calls == []
+
+    calls.clear()
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), FakeMR(branch="hotfix/urgent-fix")))
+    pipeline.review_merge_request(1, 2)
     assert calls == []
