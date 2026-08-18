@@ -278,3 +278,35 @@ def test_review_merge_request_marks_all_files_skipped_when_deadline_passed(monke
     assert "a.py" in summary
     assert "b.py" in summary
     assert summary.count("MR deadline of 0s reached") == 2
+
+
+def test_render_summary_of_all_clean_carries_snark(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr(pipeline, "snark", lambda: "Всьо хуйня, давай по новій")
+    summary = render_summary([FileOutcome("a.py", "clean", "")])
+    assert "Всьо хуйня, давай по новій" in summary
+    assert "LGTM" in summary
+
+
+def test_render_summary_with_findings_carries_snark(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr(pipeline, "snark", lambda: "Тобі пизда, тікай з городу")
+    summary = render_summary([FileOutcome("a.py", "reviewed", "1 response(s)")])
+    assert "Тобі пизда, тікай з городу" in summary
+
+
+def test_render_summary_stays_dry_when_snark_disabled(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", False)
+    monkeypatch.setattr(pipeline, "snark", lambda: "SHOULD-NOT-APPEAR")
+    summary = render_summary([FileOutcome("a.py", "clean", "")])
+    assert "SHOULD-NOT-APPEAR" not in summary
+    assert "LGTM" in summary
+
+
+def test_render_summary_keeps_errors_snark_free(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr(pipeline, "snark", lambda: "Сука, руль вирвало")
+    summary = render_summary([FileOutcome("c.py", "error", "timeout after 90s")])
+    error_section = summary.split("**Errors:**", 1)[1]
+    assert "Сука, руль вирвало" not in error_section
+    assert "timeout after 90s" in error_section

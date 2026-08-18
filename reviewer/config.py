@@ -35,6 +35,9 @@ PROMPT_TOKEN_BUFFER = env_int("PROMPT_TOKEN_BUFFER", 128)
 INCLUDE_FILE_CONTEXT = env_bool("INCLUDE_FILE_CONTEXT", False)
 CONTEXT_WINDOW = env_int("CONTEXT_WINDOW", 15)
 
+# Tone. Off makes every summary strictly dry and professional.
+SNARK = env_bool("SNARK", True)
+
 # Deadlines and limits
 PER_FILE_TIMEOUT_S = env_int("PER_FILE_TIMEOUT_S", 90)
 MR_TIMEOUT_S = env_int("MR_TIMEOUT_S", 480)

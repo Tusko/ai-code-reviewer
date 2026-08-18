@@ -6,6 +6,7 @@ from typing import Sequence
 from reviewer import config, gitlab_client, prompt as prompt_mod
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.filters import is_reviewable
+from reviewer.memes import snark
 from reviewer.ollama_client import chat
 from reviewer.queue import DedupeCache
 
@@ -131,6 +132,8 @@ def render_summary(outcomes: Sequence[FileOutcome]) -> str:
     errored = [o for o in outcomes if o.status == "error"]
 
     lines = ["## 🤖 AI Code Review"]
+    if config.SNARK:
+        lines.append(f"\n_{snark()}_")
 
     if reviewed:
         lines.append(f"\n**Findings on {len(reviewed)} file(s):** "

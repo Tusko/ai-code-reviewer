@@ -65,3 +65,13 @@ def test_memes_preserved():
     from reviewer.memes import meme_phrases
     assert len(meme_phrases) == 41
     assert "Nihuyasobi na oborot." in meme_phrases
+
+
+def test_snark_defaults_on():
+    import reviewer.config as cfg
+    assert cfg.SNARK is True
+
+
+def test_snark_returns_a_meme_phrase():
+    from reviewer.memes import meme_phrases, snark
+    assert snark() in meme_phrases
