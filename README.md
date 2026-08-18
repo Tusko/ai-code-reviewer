@@ -135,8 +135,9 @@ than dropped silently.
 
 Two situations skip a review entirely and **post no comment on the MR**:
 
-*   The merge request's source branch starts with `release/`. This is a
-    deliberate, permanent skip — release branches are never reviewed.
+*   The merge request's source branch starts with `release/` or `hotfix/`.
+    This is a deliberate, permanent skip — release and hotfix branches are
+    never reviewed.
 *   The merge request's diff is byte-for-byte identical to the diff from its
     last completed review (tracked by `DEDUPE_CACHE_SIZE` most-recent
     fingerprints). This is a cost-saving skip on repeat webhooks, not a
@@ -144,7 +145,7 @@ Two situations skip a review entirely and **post no comment on the MR**:
     fingerprint ages out of the cache.
 
 In both cases the reason is visible in `docker compose logs -f app` (`targets
-a release branch; skipping` / `diff unchanged since last review; skipping`)
+source branch is release/ or hotfix/; skipping` / `diff unchanged since last review; skipping`)
 even though nothing appears on the MR itself. A review that fails partway
 through (for example, a GitLab API error while posting the summary) is never
 counted as "reviewed" for dedupe purposes — the next identical webhook will
