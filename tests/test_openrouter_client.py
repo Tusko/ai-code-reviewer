@@ -5,11 +5,12 @@ from reviewer.openrouter_client import chat
 
 
 class FakeResponse:
-    def __init__(self, payload, status=200, raw=""):
+    def __init__(self, payload, status=200, raw="", headers=None):
         self._payload = payload
         self.status_code = status
         self.text = raw or json.dumps(payload)
         self.ok = status == 200
+        self.headers = headers or {}
 
     def json(self):
         if self._payload is None:
@@ -71,6 +72,7 @@ def test_openrouter_sends_model_and_auth(monkeypatch):
 
 def test_openrouter_http_error_is_failed(monkeypatch):
     monkeypatch.setattr("reviewer.openrouter_client.config.OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("reviewer.openrouter_client.time.sleep", lambda s: None)
     monkeypatch.setattr(
         "reviewer.openrouter_client.requests.post",
         lambda *a, **k: FakeResponse(
@@ -79,7 +81,78 @@ def test_openrouter_http_error_is_failed(monkeypatch):
     )
     result = chat("sys", "user", deadline_s=30)
     assert result.failed is True
+    assert result.done_reason == "ratelimit"
     assert "rate limited" in result.text
+
+
+def test_openrouter_retries_429_then_succeeds(monkeypatch):
+    monkeypatch.setattr("reviewer.openrouter_client.config.OPENROUTER_API_KEY", "sk-or-test")
+    slept = []
+    monkeypatch.setattr("reviewer.openrouter_client.time.sleep", slept.append)
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return FakeResponse(
+                {"error": {"message": "Provider returned error"}}, status=429,
+            )
+        return FakeResponse(_ok("Ну шо, реліз."))
+
+    monkeypatch.setattr("reviewer.openrouter_client.requests.post", post)
+    result = chat("sys", "user", deadline_s=30)
+    assert result.failed is False
+    assert result.text == "Ну шо, реліз."
+    assert len(calls) == 2
+    assert slept == [2.0]
+
+
+def test_openrouter_honours_retry_after_header(monkeypatch):
+    monkeypatch.setattr("reviewer.openrouter_client.config.OPENROUTER_API_KEY", "sk-or-test")
+    slept = []
+    monkeypatch.setattr("reviewer.openrouter_client.time.sleep", slept.append)
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return FakeResponse(
+                {"error": {"message": "slow down"}}, status=429,
+                headers={"Retry-After": "7"},
+            )
+        return FakeResponse(_ok())
+
+    monkeypatch.setattr("reviewer.openrouter_client.requests.post", post)
+    chat("sys", "user", deadline_s=60)
+    assert slept == [7.0]
+
+
+def test_openrouter_does_not_retry_past_deadline(monkeypatch):
+    monkeypatch.setattr("reviewer.openrouter_client.config.OPENROUTER_API_KEY", "sk-or-test")
+    slept = []
+    monkeypatch.setattr("reviewer.openrouter_client.time.sleep", slept.append)
+    monkeypatch.setattr(
+        "reviewer.openrouter_client.requests.post",
+        lambda *a, **k: FakeResponse({"error": {"message": "nope"}}, status=429),
+    )
+    result = chat("sys", "user", deadline_s=3)
+    assert result.done_reason == "ratelimit"
+    assert slept == []
+
+
+def test_openrouter_does_not_retry_client_error(monkeypatch):
+    monkeypatch.setattr("reviewer.openrouter_client.config.OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("reviewer.openrouter_client.time.sleep", lambda s: None)
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        return FakeResponse({"error": {"message": "bad key"}}, status=401)
+
+    monkeypatch.setattr("reviewer.openrouter_client.requests.post", post)
+    result = chat("sys", "user", deadline_s=30)
+    assert result.done_reason == "error"
+    assert len(calls) == 1
 
 
 def test_openrouter_error_payload_on_200_is_failed(monkeypatch):

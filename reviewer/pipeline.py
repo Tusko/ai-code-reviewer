@@ -306,6 +306,10 @@ def summary_chat(
         logging.warning(
             "OpenRouter summary failed (%s)", result.done_reason,
         )
+        if result.done_reason == "ratelimit" and not config.SIDOROVICH_OLLAMA_FALLBACK:
+            # Transient, not "this deployment has no voice model". Keep the
+            # ratelimit reason so the caller retries instead of deduping the MR.
+            return result
     if not config.SIDOROVICH_OLLAMA_FALLBACK:
         # A code model writing Ukrainian surzhyk produces gibberish under
         # Sidorovich's name. Report the voice as unavailable instead.
@@ -359,6 +363,7 @@ def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
         dedupe.remember(fingerprint)
         return
     if result.failed or not result.text.strip():
+        # Nothing is deduped here: the next webhook for this MR retries.
         logging.error(
             "Sidorovich summary failed for MR !%s: %s", mr_iid, result.done_reason,
         )

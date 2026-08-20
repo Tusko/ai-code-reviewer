@@ -322,6 +322,8 @@ def test_summary_chat_falls_back_to_ollama_when_openrouter_empty(monkeypatch):
 def test_summary_chat_rate_limit_does_not_reach_ollama_by_default(monkeypatch):
     monkeypatch.setattr(pipeline.config, "OPENROUTER_API_KEY", "sk-or-test")
     monkeypatch.setattr(pipeline.config, "SIDOROVICH_OLLAMA_FALLBACK", False)
+    called = []
+    monkeypatch.setattr(pipeline, "chat", lambda *a, **k: called.append(1))
     monkeypatch.setattr(
         pipeline.openrouter_client, "chat",
         lambda *a, **k: ChatResult(
@@ -329,7 +331,37 @@ def test_summary_chat_rate_limit_does_not_reach_ollama_by_default(monkeypatch):
             prompt_eval_count=0, eval_count=0, elapsed_s=0.1,
         ),
     )
-    assert pipeline.summary_chat("sys", "user", 30).done_reason == "unavailable"
+    # "ratelimit", not "unavailable": a rate limit is transient, and reporting it
+    # as "no voice model here" makes the caller dedupe the MR forever.
+    assert pipeline.summary_chat("sys", "user", 30).done_reason == "ratelimit"
+    assert called == []
+
+
+def test_rate_limited_summary_is_not_deduped(monkeypatch):
+    notes = []
+    mr = FakeMR(branch="release/2026.08", commits=[FakeCommit("aaa", "MONO-1 fix a")])
+
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), mr))
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
+                        lambda m, body: notes.append(body))
+    attempts = []
+
+    def limited(*a, **k):
+        attempts.append(1)
+        return ChatResult(text="", done_reason="ratelimit",
+                          prompt_eval_count=0, eval_count=0, elapsed_s=0.0)
+
+    monkeypatch.setattr(pipeline, "summary_chat", limited)
+    monkeypatch.setattr(pipeline, "dedupe", pipeline.DedupeCache(maxsize=8))
+
+    pipeline.review_merge_request(1, 908)
+    assert notes == []
+
+    # A rate limit must leave the MR retryable: the next webhook tries again
+    # instead of finding the commits already deduped.
+    pipeline.review_merge_request(1, 908)
+    assert notes == []
+    assert len(attempts) == 2
 
 
 def test_unavailable_voice_posts_plain_commit_digest(monkeypatch):
