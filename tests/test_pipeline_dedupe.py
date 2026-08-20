@@ -168,6 +168,30 @@ def test_skipped_branch_posts_sidorovich_summary(monkeypatch):
     assert review_calls == []
 
 
+def test_sidorovich_summary_retries_when_russian(monkeypatch):
+    notes = []
+    users = []
+    replies = [
+        _sidorovich("Опять этот недоделанный высер в репозиторий закинули без спроса."),
+        _sidorovich("Опять цей недолугий висер у репозиторій закинули без спросу."),
+    ]
+
+    def fake_chat(system, user, deadline_s):
+        users.append(user)
+        return replies.pop(0)
+
+    mr = FakeMR(branch="release/2026.08")
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), mr))
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
+                        lambda m, body: notes.append(body))
+    monkeypatch.setattr(pipeline, "summary_chat", fake_chat)
+    monkeypatch.setattr(pipeline, "dedupe", pipeline.DedupeCache(maxsize=8))
+
+    pipeline.review_merge_request(1, 1)
+    assert notes == ["Опять цей недолугий висер у репозиторій закинули без спросу."]
+    assert "російською" in users[1]
+
+
 def test_sidorovich_summary_is_deduped_until_commits_change(monkeypatch):
     notes = []
     mr = FakeMR(branch="release/2026.08", commits=[FakeCommit("aaa", "fix a")])

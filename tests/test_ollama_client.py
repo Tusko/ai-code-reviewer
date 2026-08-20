@@ -157,6 +157,11 @@ def test_clean_response_keeps_findings_alongside_lgtm():
     assert "[BLOCKER]" in clean_response(text)
 
 
+def test_clean_response_preserves_code_fence_indentation():
+    text = "**🔴 [BLOCKER]**\nbad\n*Fix:*\n```python\n    return q\n```"
+    assert "    return q" in clean_response(text)
+
+
 def test_clean_response_swaps_the_for_meme():
     from reviewer.memes import meme_phrases
     assert clean_response("The") in meme_phrases

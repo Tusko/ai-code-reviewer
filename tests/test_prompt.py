@@ -1,8 +1,9 @@
 from reviewer.diff_parser import Hunk
 from reviewer.prompt import (
-    SYSTEM_PROMPT, SIDOROVICH_SYSTEM_PROMPT, build_commit_summary_prompt,
+    SYSTEM_PROMPT, SIDOROVICH_SYSTEM_PROMPT, SIDOROVICH_REVIEW_VOICE_PROMPT,
+    build_commit_summary_prompt,
     build_file_prompt, estimate_tokens, extract_ticket_key, fits,
-    input_token_budget, render_hunk,
+    input_token_budget, looks_too_russian, render_hunk,
 )
 
 HUNK = Hunk(
@@ -76,6 +77,25 @@ def test_sidorovich_prompt_keeps_format_rules():
     assert "Ось короткий огляд" in SIDOROVICH_SYSTEM_PROMPT
     assert "MONO-123" in SIDOROVICH_SYSTEM_PROMPT
     assert "100–150" in SIDOROVICH_SYSTEM_PROMPT
+    assert "Не пиши російською" in SIDOROVICH_SYSTEM_PROMPT
+    assert "этот" in SIDOROVICH_SYSTEM_PROMPT
+
+
+def test_sidorovich_review_voice_keeps_findings_intact():
+    assert "Сідорович" in SIDOROVICH_REVIEW_VOICE_PROMPT
+    assert "Не додавай і не викидай знахідок" in SIDOROVICH_REVIEW_VOICE_PROMPT
+    assert "*Fix:*" in SIDOROVICH_REVIEW_VOICE_PROMPT
+    assert "[BLOCKER]" in SIDOROVICH_REVIEW_VOICE_PROMPT
+    assert "этот" in SIDOROVICH_REVIEW_VOICE_PROMPT
+
+
+def test_looks_too_russian_catches_pure_russian_sidorovich():
+    assert looks_too_russian(
+        "Опять этот недоделанный высер в репозиторий закинули без спроса."
+    )
+    assert not looks_too_russian(
+        "Опять цей недолугий висер у репозиторій закинули без спросу."
+    )
 
 
 def test_extract_ticket_key_from_title():

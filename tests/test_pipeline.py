@@ -4,9 +4,17 @@ from reviewer import pipeline
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.ollama_client import ChatResult
 from reviewer.pipeline import (
-    FileOutcome, build_prompt_ladder, render_summary, review_file,
+    FileOutcome, build_prompt_ladder, flavor_review, prefer_ukrainian,
+    preserves_findings, render_summary, review_file,
     review_merge_request, select_files,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_openrouter_voice(monkeypatch):
+    # review_file flavors findings via OpenRouter when a key is set. Keep
+    # existing tests hermetic unless they opt in.
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
 
 
 def fd(path, added=1, **kwargs):
@@ -310,3 +318,152 @@ def test_render_summary_keeps_errors_snark_free(monkeypatch):
     error_section = summary.split("**Errors:**", 1)[1]
     assert "Сука, руль вирвало" not in error_section
     assert "timeout after 90s" in error_section
+
+
+DRY_FINDING = (
+    "**🔴 [BLOCKER]**\n"
+    "SQL is concatenated.\n"
+    "*Fix:*\n"
+    "```python\n"
+    "    q = sanitize(req.q)\n"
+    "```"
+)
+VOICED_FINDING = (
+    "**🔴 [BLOCKER]**\n"
+    "Ти шо, сирий SQL в проді пхаєш?\n"
+    "*Fix:*\n"
+    "```python\n"
+    "    q = sanitize(req.q)\n"
+    "```"
+)
+
+
+def test_preserves_findings_accepts_prose_only_rewrite():
+    assert preserves_findings(DRY_FINDING, VOICED_FINDING) is True
+
+
+def test_preserves_findings_rejects_dropped_tag():
+    assert preserves_findings(DRY_FINDING, "просто лайка без тега") is False
+
+
+def test_preserves_findings_rejects_mutated_fix():
+    mutated = VOICED_FINDING.replace("sanitize(req.q)", "sanitize(req.q)  # lol")
+    assert preserves_findings(DRY_FINDING, mutated) is False
+
+
+def test_flavor_review_is_noop_without_openrouter_key():
+    assert flavor_review(DRY_FINDING) == DRY_FINDING
+
+
+def test_flavor_review_is_noop_when_snark_off(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", False)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call")),
+    )
+    assert flavor_review(DRY_FINDING) == DRY_FINDING
+
+
+def test_flavor_review_returns_rewrite_when_findings_kept(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: _chat_result(VOICED_FINDING),
+    )
+    assert flavor_review(DRY_FINDING) == VOICED_FINDING
+
+
+def test_flavor_review_keeps_dry_when_rewrite_drops_findings(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: _chat_result("Єбать, все хуйня, але без тегів."),
+    )
+    assert flavor_review(DRY_FINDING) == DRY_FINDING
+
+
+def test_flavor_review_keeps_dry_when_openrouter_fails(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: _chat_result("boom", done_reason="error"),
+    )
+    assert flavor_review(DRY_FINDING) == DRY_FINDING
+
+
+def test_review_file_posts_sidorovich_voice(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result(DRY_FINDING),
+    )
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: _chat_result(VOICED_FINDING),
+    )
+    inline_calls = []
+    monkeypatch.setattr(
+        pipeline.gitlab_client, "post_inline",
+        lambda mr, path, line, body: inline_calls.append(body) or True,
+    )
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note", lambda *a, **k: None)
+
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+
+    assert outcome.status == "reviewed"
+    assert "сирий SQL" in inline_calls[0]
+    assert "SQL is concatenated" not in inline_calls[0]
+
+
+def test_prefer_ukrainian_retries_once():
+    first = _chat_result("Опять этот высер без спроса.")
+    second = _chat_result("Опять цей висер без спросу.")
+    calls = {"n": 0}
+
+    def retry():
+        calls["n"] += 1
+        return second
+
+    assert prefer_ukrainian(first, retry).text == second.text
+    assert calls["n"] == 1
+    assert prefer_ukrainian(second, retry).text == second.text
+    assert calls["n"] == 1
+
+
+def test_flavor_review_retries_russian_then_keeps_ukrainian(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
+    replies = [
+        _chat_result(
+            "**🔴 [BLOCKER]**\nОпять этот высер с SQL.\n*Fix:*\n```python\n    q = sanitize(req.q)\n```"
+        ),
+        _chat_result(VOICED_FINDING),
+    ]
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: replies.pop(0),
+    )
+    assert flavor_review(DRY_FINDING) == VOICED_FINDING
+
+
+def test_flavor_review_keeps_dry_when_still_russian(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
+    russian = (
+        "**🔴 [BLOCKER]**\n"
+        "Опять этот высер с SQL.\n"
+        "*Fix:*\n"
+        "```python\n"
+        "    q = sanitize(req.q)\n"
+        "```"
+    )
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: _chat_result(russian),
+    )
+    assert flavor_review(DRY_FINDING) == DRY_FINDING

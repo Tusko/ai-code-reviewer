@@ -14,7 +14,7 @@ def chat(
     *,
     temperature: float = 1.0,
 ) -> ChatResult:
-    """One-shot OpenRouter chat completion for the Sidorovich summary."""
+    """One-shot OpenRouter chat completion for Sidorovich voice."""
     started = time.monotonic()
     if not config.OPENROUTER_API_KEY:
         return ChatResult(

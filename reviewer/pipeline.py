@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Sequence
@@ -9,6 +10,10 @@ from reviewer.filters import is_reviewable
 from reviewer.memes import snark
 from reviewer.ollama_client import ChatResult, chat
 from reviewer.queue import DedupeCache
+
+VOICE_DEADLINE_S = 20
+FINDING_TAGS = ("[BLOCKER]", "[SUGGESTION]", "[NIT]")
+FENCE_BODY_RE = re.compile(r"```(?:\w*)\n?(.*?)```", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -104,7 +109,10 @@ def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
         if result.done_reason == "length":
             truncated = True
         if result.text and not result.text.startswith("LGTM."):
-            bodies.append(result.text)
+            finding = result.text
+            if result.done_reason != "length":
+                finding = flavor_review(finding)
+            bodies.append(finding)
 
     if not bodies:
         return FileOutcome(path, "clean", l2_detail)
@@ -123,6 +131,68 @@ def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
     if truncated:
         detail += ", truncated at output token limit"
     return FileOutcome(path, "reviewed", detail)
+
+
+def _fence_bodies(text: str) -> list[str]:
+    return FENCE_BODY_RE.findall(text)
+
+
+def preserves_findings(original: str, flavored: str) -> bool:
+    """True when the rewrite kept every finding tag and every Fix code block."""
+    for tag in FINDING_TAGS:
+        if original.count(tag) != flavored.count(tag):
+            return False
+    original_fences = _fence_bodies(original)
+    return not original_fences or _fence_bodies(flavored) == original_fences
+
+
+def flavor_review(text: str) -> str:
+    """Rewrite a dry finding as Sidorovich. Voice is extra: never block or replace."""
+    if not config.SNARK or not config.OPENROUTER_API_KEY:
+        return text
+    result = prefer_ukrainian(
+        openrouter_client.chat(
+            prompt_mod.SIDOROVICH_REVIEW_VOICE_PROMPT,
+            text,
+            deadline_s=VOICE_DEADLINE_S,
+            temperature=0.8,
+        ),
+        lambda: openrouter_client.chat(
+            prompt_mod.SIDOROVICH_REVIEW_VOICE_PROMPT,
+            text + "\n\n" + prompt_mod.SIDOROVICH_UKRAINIAN_RETRY,
+            deadline_s=VOICE_DEADLINE_S,
+            temperature=0.8,
+        ),
+    )
+    flavored = (result.text or "").strip()
+    if result.failed or result.done_reason == "length" or not flavored:
+        logging.warning(
+            "Sidorovich voice rewrite skipped (%s); posting dry review",
+            result.done_reason,
+        )
+        return text
+    if not preserves_findings(text, flavored):
+        logging.warning(
+            "Sidorovich voice rewrite changed findings; posting dry review",
+        )
+        return text
+    if prompt_mod.looks_too_russian(flavored):
+        logging.warning(
+            "Sidorovich voice still Russian after retry; posting dry review",
+        )
+        return text
+    return flavored
+
+
+def prefer_ukrainian(result: ChatResult, retry) -> ChatResult:
+    """One retry when Sidorovich slipped into Russian."""
+    if result.failed or not prompt_mod.looks_too_russian(result.text):
+        return result
+    logging.warning("Sidorovich wrote Russian; retrying in Ukrainian")
+    retried = retry()
+    if retried.failed or not (retried.text or "").strip():
+        return result
+    return retried
 
 
 def render_summary(outcomes: Sequence[FileOutcome]) -> str:
@@ -179,10 +249,18 @@ def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
         logging.info("MR !%s source branch is release/ or hotfix/; no commits to summarise", mr_iid)
         return
 
-    result = summary_chat(
-        prompt_mod.SIDOROVICH_SYSTEM_PROMPT,
-        prompt_mod.build_commit_summary_prompt(commits),
-        deadline_s=config.PER_FILE_TIMEOUT_S,
+    user = prompt_mod.build_commit_summary_prompt(commits)
+    result = prefer_ukrainian(
+        summary_chat(
+            prompt_mod.SIDOROVICH_SYSTEM_PROMPT,
+            user,
+            deadline_s=config.PER_FILE_TIMEOUT_S,
+        ),
+        lambda: summary_chat(
+            prompt_mod.SIDOROVICH_SYSTEM_PROMPT,
+            user + "\n\n" + prompt_mod.SIDOROVICH_UKRAINIAN_RETRY,
+            deadline_s=config.PER_FILE_TIMEOUT_S,
+        ),
     )
     if result.failed or not result.text.strip():
         logging.error(

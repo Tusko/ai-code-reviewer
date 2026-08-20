@@ -107,8 +107,10 @@ OLLAMA_NUM_BATCH=512
 INCLUDE_FILE_CONTEXT=false
 CONTEXT_WINDOW=15
 
-# Tone of the MR summary comment. true adds one random meme phrase per
-# summary; false keeps every summary strictly dry and professional.
+# Tone. true: a meme on the summary note, and Sidorovich voice on inline
+# findings (OpenRouter rewrite of the dry Ollama review). false: dry
+# comments end to end. Voice never invents or drops issues; a failed
+# rewrite posts the original review.
 SNARK=true
 
 # Deadlines and limits.
@@ -133,6 +135,12 @@ Reviews run one file at a time. Each file gets its own request with a
 Files that cannot fit the context budget are named in the summary note rather
 than dropped silently.
 
+Finding detection always stays on Ollama. With `SNARK=true` and
+`OPENROUTER_API_KEY` set, each inline comment is rewritten as Sidorovich
+(surzhyk, swearing) afterwards — same headings, same `*Fix:*` blocks, only
+the prose changes. If that rewrite fails, rate-limits, or mutates a finding,
+the dry review is posted instead. `SNARK=false` keeps comments professional.
+
 Two situations skip a **full** file-by-file review:
 
 *   The merge request's source branch starts with `release/` or `hotfix/`.
@@ -141,9 +149,9 @@ Two situations skip a **full** file-by-file review:
     the team can see what landed without waiting on the per-file loop.
     That roast uses OpenRouter (`OPENROUTER_MODEL`, default
     `google/gemma-4-26b-a4b-it:free`) when `OPENROUTER_API_KEY` is set —
-    local coder models are too stiff for the character. File-by-file review
-    always stays on Ollama. If OpenRouter is missing a key, rate-limits, or
-    errors, Sidorovich falls back to Ollama too.
+    local coder models are too stiff for the character. If OpenRouter is
+    missing a key, rate-limits, or errors, Sidorovich falls back to Ollama
+    too.
 *   The merge request's diff is byte-for-byte identical to the diff from its
     last completed review (tracked by `DEDUPE_CACHE_SIZE` most-recent
     fingerprints). This is a cost-saving skip on repeat webhooks, not a

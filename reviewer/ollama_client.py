@@ -11,6 +11,7 @@ from reviewer import config
 from reviewer.memes import meme_phrases
 
 HARMONY_TOKEN_RE = re.compile(r"<\|[^>]*\|?>")
+FENCE_SPLIT_RE = re.compile(r"(```[\s\S]*?```)")
 FINDING_TAGS = ("[BLOCKER]", "[SUGGESTION]", "[NIT]")
 
 
@@ -33,7 +34,13 @@ class ChatResult:
 
 def clean_response(text: str) -> str:
     text = HARMONY_TOKEN_RE.sub(" ", text).strip()
-    text = re.sub(r"[ \t]{2,}", " ", text)
+    pieces = []
+    for i, part in enumerate(FENCE_SPLIT_RE.split(text)):
+        if i % 2 == 0:
+            pieces.append(re.sub(r"[ \t]{2,}", " ", part))
+        else:
+            pieces.append(part)
+    text = "".join(pieces)
     if text == "The":
         return random.choice(meme_phrases)
     if "[LGTM]" in text and not any(tag in text for tag in FINDING_TAGS):

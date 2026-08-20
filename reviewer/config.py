@@ -46,7 +46,9 @@ OPENROUTER_BASE_URL = os.environ.get(
 )
 OPENROUTER_MAX_TOKENS = env_int("OPENROUTER_MAX_TOKENS", 512)
 
-# Tone. Off makes every summary strictly dry and professional.
+# Tone. Off keeps summaries and inline comments dry. On adds a meme to the
+# summary and, when OpenRouter is keyed, rewrites inline findings as
+# Sidorovich. The bugs themselves still come from the local coder model.
 SNARK = env_bool("SNARK", True)
 
 # Deadlines and limits
