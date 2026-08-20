@@ -35,6 +35,17 @@ PROMPT_TOKEN_BUFFER = env_int("PROMPT_TOKEN_BUFFER", 128)
 INCLUDE_FILE_CONTEXT = env_bool("INCLUDE_FILE_CONTEXT", False)
 CONTEXT_WINDOW = env_int("CONTEXT_WINDOW", 15)
 
+# OpenRouter — used only for release/hotfix Sidorovich summaries.
+# Empty key keeps those summaries on local Ollama.
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY") or None
+OPENROUTER_MODEL = os.environ.get(
+    "OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free",
+)
+OPENROUTER_BASE_URL = os.environ.get(
+    "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1",
+)
+OPENROUTER_MAX_TOKENS = env_int("OPENROUTER_MAX_TOKENS", 512)
+
 # Tone. Off makes every summary strictly dry and professional.
 SNARK = env_bool("SNARK", True)
 

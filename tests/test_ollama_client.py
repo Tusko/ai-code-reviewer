@@ -116,6 +116,21 @@ def test_num_batch_512_is_sent(monkeypatch):
     # Regression for B1: the old hardcoded 128 slowed prompt eval 2-4x on Metal.
     assert captured["options"]["num_batch"] == 512
     assert captured["stream"] is True
+    assert captured["options"]["temperature"] == 0.1
+    assert captured["options"]["seed"] == 42
+
+
+def test_chat_honours_temperature_and_omits_seed(monkeypatch):
+    captured = {}
+
+    def fake_post(url, json=None, **kwargs):
+        captured.update(json)
+        return FakeResponse(_stream(["ok"]))
+
+    monkeypatch.setattr("reviewer.ollama_client.requests.post", fake_post)
+    chat("sys", "user", deadline_s=30, temperature=0.85, seed=None)
+    assert captured["options"]["temperature"] == 0.85
+    assert "seed" not in captured["options"]
 
 
 def test_transport_error_returns_error_result(monkeypatch):

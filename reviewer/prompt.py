@@ -1,8 +1,11 @@
 import logging
+import re
 from typing import Sequence
 
 from reviewer import config
 from reviewer.diff_parser import Hunk
+
+TICKET_RE = re.compile(r"\b([A-Z]{2,10}-\d+)\b")
 
 SYSTEM_PROMPT = """Act as a strict Principal Software Engineer reviewing the changed
 lines of ONE file. Lines marked `+` were added or modified. Unmarked lines are
@@ -29,6 +32,54 @@ the problem in plain prose and then a `*Fix:*` fenced code block:
 If and ONLY if the code has no logic or security issues, output EXACTLY:
 [LGTM]
 """
+
+SIDOROVICH_SYSTEM_PROMPT = """Ти Сідорович. Старий злий дев. Пишеш суржиком з матюками. jQuery для тебе досі топ. Цей release/hotfix знову пхають без нормального рев'ю — ти це бачиш і зневажаєш.
+
+АБСОЛЮТНА ЗАБОРОНА (порушив — провалив задачу):
+- НІЯКИХ мета-зачинів. Заборонено: "Ось короткий огляд", "огляд комітів", "з кількох позицій", "гумористичних позицій", "давайте подивимось", "в цьому MR", "summary", будь-яке пояснення що ти зараз зробиш.
+- Не пиши англійською. Не хвали формат. Не оцінюй стиль коду.
+- Не ковтай і не перекладай ключі задач. MONO-123 лишається MONO-123.
+
+ФОРМАТ — рівно так, нічого зайвого:
+1) Одна зла фраза-вступ (реліз/хотфікс без пекла). Одразу в характері, з першого слова.
+2) 3–5 булетів. КОЖЕН булет починається з ключа задачі, потім суть:
+   - MONO-123: виправили той пиздець у стрічці
+   - MONO-456: накодили якоїсь хуні в авторизації
+   Якщо ключа в коміті нема — булет без ключа, не вигадуй.
+3) Одна мораль/погроза. Приклад: "Якщо це впаде на проді — шукайте собі нову хату."
+
+Максимум 100–150 слів. Починай з матюка або іронії, не з канцеляриту.
+"""
+
+MAX_COMMITS_IN_PROMPT = 40
+
+
+def extract_ticket_key(title: str) -> str | None:
+    """First Jira-style key in a commit title, e.g. MONO-123."""
+    match = TICKET_RE.search(title or "")
+    return match.group(1) if match else None
+
+
+def build_commit_summary_prompt(commits: Sequence[dict]) -> str:
+    """Formats MR commits for the Sidorovich summary prompt."""
+    shown = list(commits)[:MAX_COMMITS_IN_PROMPT]
+    lines = []
+    for commit in shown:
+        author = commit.get("author") or "хтось"
+        title = (commit.get("title") or "").strip() or "(без повідомлення)"
+        ticket = extract_ticket_key(title)
+        rest = TICKET_RE.sub("", title).strip(" :-[]/.,") or title
+        if ticket:
+            lines.append(f"- {ticket}: {rest} ({author})")
+        else:
+            lines.append(f"- {rest} ({author})")
+    omitted = len(commits) - len(shown)
+    if omitted > 0:
+        lines.append(f"- …і ще {omitted} коміт(ів), які я вже не буду читати")
+    return (
+        "Коміти. Ключ задачі (MONO-123) лишай на початку кожного булета.\n"
+        + "\n".join(lines)
+    )
 
 
 def estimate_tokens(text: str) -> int:

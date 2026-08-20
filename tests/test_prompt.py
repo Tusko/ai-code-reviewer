@@ -1,6 +1,7 @@
 from reviewer.diff_parser import Hunk
 from reviewer.prompt import (
-    SYSTEM_PROMPT, build_file_prompt, estimate_tokens, fits,
+    SYSTEM_PROMPT, SIDOROVICH_SYSTEM_PROMPT, build_commit_summary_prompt,
+    build_file_prompt, estimate_tokens, extract_ticket_key, fits,
     input_token_budget, render_hunk,
 )
 
@@ -68,3 +69,39 @@ def test_input_token_budget_leaves_room_for_output(monkeypatch):
 def test_fits_rejects_oversized_prompt():
     assert fits("x") is True
     assert fits("x" * 10_000_000) is False
+
+
+def test_sidorovich_prompt_keeps_format_rules():
+    assert "Сідорович" in SIDOROVICH_SYSTEM_PROMPT
+    assert "Ось короткий огляд" in SIDOROVICH_SYSTEM_PROMPT
+    assert "MONO-123" in SIDOROVICH_SYSTEM_PROMPT
+    assert "100–150" in SIDOROVICH_SYSTEM_PROMPT
+
+
+def test_extract_ticket_key_from_title():
+    assert extract_ticket_key("MONO-123 fix feed crash") == "MONO-123"
+    assert extract_ticket_key("[MONO-456] auth hotfix") == "MONO-456"
+    assert extract_ticket_key("feat: ABC-7 do thing") == "ABC-7"
+    assert extract_ticket_key("no ticket here") is None
+
+
+def test_build_commit_summary_prompt_lists_commits():
+    text = build_commit_summary_prompt([
+        {"short_id": "abc1234", "author": "Ivan", "title": "MONO-123 fix feed crash"},
+        {"short_id": "def5678", "author": "Oksana", "title": "auth hotfix"},
+    ])
+    assert "MONO-123: fix feed crash (Ivan)" in text
+    assert "- auth hotfix (Oksana)" in text
+    assert "abc1234" not in text
+
+
+def test_build_commit_summary_prompt_caps_long_lists():
+    commits = [
+        {"short_id": f"{i:07d}", "author": "dev", "title": f"c{i}"}
+        for i in range(45)
+    ]
+    text = build_commit_summary_prompt(commits)
+    assert "- c0 (dev)" in text
+    assert "- c39 (dev)" in text
+    assert "- c44 (dev)" not in text
+    assert "ще 5 коміт" in text

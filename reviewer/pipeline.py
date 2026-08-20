@@ -3,11 +3,11 @@ import time
 from dataclasses import dataclass
 from typing import Sequence
 
-from reviewer import config, gitlab_client, prompt as prompt_mod
+from reviewer import config, gitlab_client, openrouter_client, prompt as prompt_mod
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.filters import is_reviewable
 from reviewer.memes import snark
-from reviewer.ollama_client import chat
+from reviewer.ollama_client import ChatResult, chat
 from reviewer.queue import DedupeCache
 
 
@@ -131,7 +131,7 @@ def render_summary(outcomes: Sequence[FileOutcome]) -> str:
     skipped = [o for o in outcomes if o.status == "skipped"]
     errored = [o for o in outcomes if o.status == "error"]
 
-    lines = ["## 🤖 AI Code Review"]
+    lines = []
     if config.SNARK:
         lines.append(f"\n_{snark()}_")
 
@@ -152,13 +152,56 @@ def render_summary(outcomes: Sequence[FileOutcome]) -> str:
     return "\n".join(lines)
 
 
+def summary_chat(system: str, user: str, deadline_s: int) -> ChatResult:
+    """Sidorovich summaries: OpenRouter first, local Ollama as fallback."""
+    if config.OPENROUTER_API_KEY:
+        result = openrouter_client.chat(
+            system, user, deadline_s, temperature=1.0,
+        )
+        if not result.failed and result.text.strip():
+            return result
+        logging.warning(
+            "OpenRouter summary failed (%s); falling back to Ollama %s",
+            result.done_reason, config.OLLAMA_MODEL,
+        )
+    return chat(system, user, deadline_s, temperature=0.95, seed=None)
+
+
+def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
+    """Skip full review; post a Sidorovich commit-list roast instead."""
+    commits = gitlab_client.fetch_commits(mr)
+    fingerprint = gitlab_client.commit_fingerprint(project_id, mr_iid, commits)
+    if not force and dedupe.seen(fingerprint):
+        logging.info("MR !%s release/hotfix commits unchanged; skipping", mr_iid)
+        return
+
+    if not commits:
+        logging.info("MR !%s source branch is release/ or hotfix/; no commits to summarise", mr_iid)
+        return
+
+    result = summary_chat(
+        prompt_mod.SIDOROVICH_SYSTEM_PROMPT,
+        prompt_mod.build_commit_summary_prompt(commits),
+        deadline_s=config.PER_FILE_TIMEOUT_S,
+    )
+    if result.failed or not result.text.strip():
+        logging.error(
+            "Sidorovich summary failed for MR !%s: %s", mr_iid, result.done_reason,
+        )
+        return
+
+    gitlab_client.post_note(mr, result.text.strip())
+    dedupe.remember(fingerprint)
+    logging.info("MR !%s release/hotfix summarised (%s commits)", mr_iid, len(commits))
+
+
 def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> None:
     started = time.monotonic()
     try:
         project, mr = gitlab_client.fetch_mr(project_id, mr_iid)
 
         if should_skip_branch(getattr(mr, "source_branch", "")):
-            logging.info("MR !%s source branch is release/ or hotfix/; skipping", mr_iid)
+            summarize_release_mr(project_id, mr_iid, mr, force)
             return
 
         file_diffs = gitlab_client.fetch_file_diffs(mr)

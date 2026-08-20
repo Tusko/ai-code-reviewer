@@ -1,17 +1,36 @@
 import reviewer.pipeline as pipeline
 from reviewer.diff_parser import FileDiff, Hunk
+from reviewer.ollama_client import ChatResult
 
 FD = FileDiff("a.py", "a.py", False, False, False, False, (Hunk(1, 1, (" x", "+y")),))
 
 
+class FakeCommit:
+    def __init__(self, short_id="abc1234", title="fix feed", author_name="Ivan"):
+        self.short_id = short_id
+        self.id = short_id
+        self.title = title
+        self.message = title
+        self.author_name = author_name
+
+
 class FakeMR:
-    def __init__(self, branch="feature/x"):
+    def __init__(self, branch="feature/x", commits=None):
         self.source_branch = branch
         self.diff_refs = {"base_sha": "b", "start_sha": "s", "head_sha": "h"}
         self.notes_posted = []
+        self._commits = commits if commits is not None else [FakeCommit()]
 
     def changes(self):
         return {"changes": []}
+
+    def commits(self):
+        return list(self._commits)
+
+
+def _sidorovich(text="Опять реліз без рев'ю, їб вашу мать."):
+    return ChatResult(text=text, done_reason="stop",
+                      prompt_eval_count=0, eval_count=0, elapsed_s=0.1)
 
 
 def test_release_and_hotfix_branches_are_skipped():
@@ -119,18 +138,142 @@ def test_failed_review_does_not_suppress_retry(monkeypatch):
     assert len(review_calls) == 2
 
 
-def test_skipped_branch_mr_posts_nothing(monkeypatch):
-    calls = []
-    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), FakeMR(branch="release/2026.08")))
-    monkeypatch.setattr(pipeline.gitlab_client, "fetch_file_diffs", lambda m: [FD])
+def test_skipped_branch_posts_sidorovich_summary(monkeypatch):
+    notes = []
+    review_calls = []
+    mr = FakeMR(branch="release/2026.08")
+
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), mr))
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_file_diffs",
+                        lambda m: (_ for _ in ()).throw(AssertionError("no full review")))
     monkeypatch.setattr(pipeline.gitlab_client, "post_note",
-                        lambda m, body: calls.append(body))
+                        lambda m, body: notes.append(body))
+    monkeypatch.setattr(pipeline, "review_file",
+                        lambda *a, **k: review_calls.append(1))
+    monkeypatch.setattr(pipeline, "summary_chat",
+                        lambda *a, **k: _sidorovich("hotfix знову без пекла, сука."))
     monkeypatch.setattr(pipeline, "dedupe", pipeline.DedupeCache(maxsize=8))
 
     pipeline.review_merge_request(1, 1)
-    assert calls == []
+    assert review_calls == []
+    assert notes == ["hotfix знову без пекла, сука."]
 
-    calls.clear()
-    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), FakeMR(branch="hotfix/urgent-fix")))
+    notes.clear()
+    monkeypatch.setattr(
+        pipeline.gitlab_client, "fetch_mr",
+        lambda p, i: (object(), FakeMR(branch="hotfix/urgent-fix")),
+    )
     pipeline.review_merge_request(1, 2)
-    assert calls == []
+    assert notes == ["hotfix знову без пекла, сука."]
+    assert review_calls == []
+
+
+def test_sidorovich_summary_is_deduped_until_commits_change(monkeypatch):
+    notes = []
+    mr = FakeMR(branch="release/2026.08", commits=[FakeCommit("aaa", "fix a")])
+
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), mr))
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
+                        lambda m, body: notes.append(body))
+    monkeypatch.setattr(pipeline, "summary_chat", lambda *a, **k: _sidorovich())
+    monkeypatch.setattr(pipeline, "dedupe", pipeline.DedupeCache(maxsize=8))
+
+    pipeline.review_merge_request(1, 1)
+    pipeline.review_merge_request(1, 1)
+    assert len(notes) == 1
+
+    mr._commits = [FakeCommit("bbb", "fix b")]
+    pipeline.review_merge_request(1, 1)
+    assert len(notes) == 2
+
+
+def test_sidorovich_failure_does_not_suppress_retry(monkeypatch):
+    notes = []
+    chats = []
+    mr = FakeMR(branch="hotfix/boom")
+
+    def fake_chat(*a, **k):
+        chats.append(1)
+        if len(chats) == 1:
+            return ChatResult(text="boom", done_reason="error",
+                              prompt_eval_count=0, eval_count=0, elapsed_s=0.1)
+        return _sidorovich("тепер хоч щось")
+
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), mr))
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
+                        lambda m, body: notes.append(body))
+    monkeypatch.setattr(pipeline, "summary_chat", fake_chat)
+    monkeypatch.setattr(pipeline, "dedupe", pipeline.DedupeCache(maxsize=8))
+
+    pipeline.review_merge_request(1, 1)
+    assert notes == []
+    pipeline.review_merge_request(1, 1)
+    assert notes == ["тепер хоч щось"]
+
+
+def test_summary_chat_uses_openrouter_when_keyed(monkeypatch):
+    monkeypatch.setattr(pipeline.config, "OPENROUTER_API_KEY", "sk-or-test")
+    called = []
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: called.append(("or", k.get("temperature"))) or _sidorovich(),
+    )
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda *a, **k: called.append(("ollama", None)) or _sidorovich(),
+    )
+    result = pipeline.summary_chat("sys", "user", 30)
+    assert called == [("or", 1.0)]
+    assert result.text.startswith("Опять")
+
+
+def test_summary_chat_falls_back_to_ollama_without_key(monkeypatch):
+    monkeypatch.setattr(pipeline.config, "OPENROUTER_API_KEY", None)
+    called = []
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: called.append("or") or _sidorovich(),
+    )
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda *a, **k: called.append("ollama") or _sidorovich(),
+    )
+    pipeline.summary_chat("sys", "user", 30)
+    assert called == ["ollama"]
+
+
+def test_summary_chat_falls_back_to_ollama_when_openrouter_fails(monkeypatch):
+    monkeypatch.setattr(pipeline.config, "OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(pipeline.config, "OLLAMA_MODEL", "qwen2.5-coder:7b")
+    called = []
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: called.append("or") or ChatResult(
+            text="boom", done_reason="error",
+            prompt_eval_count=0, eval_count=0, elapsed_s=0.1,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda *a, **k: called.append("ollama") or _sidorovich("з ollama"),
+    )
+    result = pipeline.summary_chat("sys", "user", 30)
+    assert called == ["or", "ollama"]
+    assert result.text == "з ollama"
+
+
+def test_summary_chat_falls_back_to_ollama_when_openrouter_empty(monkeypatch):
+    monkeypatch.setattr(pipeline.config, "OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: ChatResult(
+            text="  ", done_reason="stop",
+            prompt_eval_count=0, eval_count=0, elapsed_s=0.1,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda *a, **k: _sidorovich("з ollama"),
+    )
+    result = pipeline.summary_chat("sys", "user", 30)
+    assert result.text == "з ollama"

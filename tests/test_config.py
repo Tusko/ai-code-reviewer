@@ -67,6 +67,29 @@ def test_memes_preserved():
     assert "Nihuyasobi na oborot." in meme_phrases
 
 
+def test_openrouter_defaults(monkeypatch):
+    for key in ("OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_BASE_URL",
+                "OPENROUTER_MAX_TOKENS"):
+        monkeypatch.delenv(key, raising=False)
+    cfg = _reload(monkeypatch)
+    assert cfg.OPENROUTER_API_KEY is None
+    assert cfg.OPENROUTER_MODEL == "google/gemma-4-26b-a4b-it:free"
+    assert cfg.OPENROUTER_BASE_URL == "https://openrouter.ai/api/v1"
+    assert cfg.OPENROUTER_MAX_TOKENS == 512
+
+
+def test_openrouter_env_overrides(monkeypatch):
+    cfg = _reload(
+        monkeypatch,
+        OPENROUTER_API_KEY="sk-or-test",
+        OPENROUTER_MODEL="google/gemma-4-31b-it:free",
+        OPENROUTER_MAX_TOKENS="256",
+    )
+    assert cfg.OPENROUTER_API_KEY == "sk-or-test"
+    assert cfg.OPENROUTER_MODEL == "google/gemma-4-31b-it:free"
+    assert cfg.OPENROUTER_MAX_TOKENS == 256
+
+
 def test_snark_defaults_on():
     import reviewer.config as cfg
     assert cfg.SNARK is True

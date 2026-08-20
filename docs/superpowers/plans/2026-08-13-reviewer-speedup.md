@@ -1716,7 +1716,7 @@ def render_summary(outcomes: Sequence[FileOutcome]) -> str:
     skipped = [o for o in outcomes if o.status == "skipped"]
     errored = [o for o in outcomes if o.status == "error"]
 
-    lines = ["## 🤖 AI Code Review"]
+    lines = []
 
     if reviewed:
         lines.append(f"\n**Findings on {len(reviewed)} file(s):** "

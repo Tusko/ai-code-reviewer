@@ -30,6 +30,22 @@ def fetch_file_diffs(mr) -> list[FileDiff]:
     return [file_diff_from_change(change) for change in changes]
 
 
+def fetch_commits(mr) -> list[dict]:
+    """Returns oldest-first commit dicts: short_id, title, author."""
+    commits = []
+    for commit in mr.commits():
+        raw_id = getattr(commit, "id", "") or ""
+        short_id = getattr(commit, "short_id", "") or raw_id[:8]
+        title = (getattr(commit, "title", None) or getattr(commit, "message", "") or "")
+        title = title.split("\n", 1)[0].strip()
+        commits.append({
+            "short_id": short_id,
+            "title": title,
+            "author": getattr(commit, "author_name", "") or "",
+        })
+    return commits
+
+
 def fetch_file_content(project, path: str, ref: str) -> str:
     try:
         blob = project.files.get(file_path=path, ref=ref)
@@ -115,5 +131,22 @@ def diff_fingerprint(project_id: int, mr_iid: int, file_diffs: Sequence[FileDiff
             for line in hunk.lines:
                 digest.update(line.encode())
                 digest.update(b"\x00")
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def commit_fingerprint(project_id: int, mr_iid: int, commits: Sequence[dict]) -> str:
+    """Stable hash of project + MR identity and commit SHAs, used for dedupe."""
+    digest = hashlib.sha256()
+    digest.update(str(project_id).encode())
+    digest.update(b"\x00")
+    digest.update(str(mr_iid).encode())
+    digest.update(b"\x00")
+    digest.update(b"commits")
+    digest.update(b"\x00")
+    for commit in commits:
+        digest.update((commit.get("short_id") or "").encode())
+        digest.update(b"\x00")
+        digest.update((commit.get("title") or "").encode())
         digest.update(b"\x00")
     return digest.hexdigest()

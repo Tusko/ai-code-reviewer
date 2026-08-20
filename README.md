@@ -133,23 +133,28 @@ Reviews run one file at a time. Each file gets its own request with a
 Files that cannot fit the context budget are named in the summary note rather
 than dropped silently.
 
-Two situations skip a review entirely and **post no comment on the MR**:
+Two situations skip a **full** file-by-file review:
 
 *   The merge request's source branch starts with `release/` or `hotfix/`.
-    This is a deliberate, permanent skip — release and hotfix branches are
-    never reviewed.
+    Full review is skipped on purpose, but the bot still posts a short
+    Sidorovich-style commit summary (surzhyk, swearing, 100–150 words) so
+    the team can see what landed without waiting on the per-file loop.
+    That roast uses OpenRouter (`OPENROUTER_MODEL`, default
+    `google/gemma-4-26b-a4b-it:free`) when `OPENROUTER_API_KEY` is set —
+    local coder models are too stiff for the character. File-by-file review
+    always stays on Ollama. If OpenRouter is missing a key, rate-limits, or
+    errors, Sidorovich falls back to Ollama too.
 *   The merge request's diff is byte-for-byte identical to the diff from its
     last completed review (tracked by `DEDUPE_CACHE_SIZE` most-recent
     fingerprints). This is a cost-saving skip on repeat webhooks, not a
     permanent one — it clears once the diff changes again, or once the
     fingerprint ages out of the cache.
 
-In both cases the reason is visible in `docker compose logs -f app` (`targets
-source branch is release/ or hotfix/; skipping` / `diff unchanged since last review; skipping`)
-even though nothing appears on the MR itself. A review that fails partway
-through (for example, a GitLab API error while posting the summary) is never
-counted as "reviewed" for dedupe purposes — the next identical webhook will
-retry it rather than being silently swallowed.
+A skipped full review is visible in `docker compose logs -f app`
+(`release/hotfix summarised` / `diff unchanged since last review; skipping`).
+A review that fails partway through (for example, a GitLab API error while
+posting the summary) is never counted as "reviewed" for dedupe purposes —
+the next identical webhook will retry it rather than being silently swallowed.
 
 After changing context, **unload the model** so Ollama drops the old KV cache:
 

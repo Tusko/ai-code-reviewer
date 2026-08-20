@@ -3,7 +3,8 @@ import gitlab.exceptions
 
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.gitlab_client import (
-    diff_fingerprint, fetch_file_content, post_inline, post_note, surgical_context,
+    commit_fingerprint, diff_fingerprint, fetch_commits, fetch_file_content,
+    post_inline, post_note, surgical_context,
 )
 
 HUNK = Hunk(old_start=1, new_start=5, lines=(" a", "+b"))
@@ -124,3 +125,34 @@ def test_post_inline_propagates_malformed_diff_refs():
     del mr.diff_refs["head_sha"]
     with pytest.raises(KeyError):
         post_inline(mr, "src/a.py", 42, "body")
+
+
+class FakeCommit:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+def test_fetch_commits_maps_fields():
+    class MR:
+        def commits(self):
+            return [
+                FakeCommit(short_id="abc1234", id="abc1234dead",
+                           title="fix feed", message="fix feed\n\nbody",
+                           author_name="Ivan"),
+                FakeCommit(id="def567890", title=None,
+                           message="hotfix auth\nmore", author_name="Oksana"),
+            ]
+
+    commits = fetch_commits(MR())
+    assert commits == [
+        {"short_id": "abc1234", "title": "fix feed", "author": "Ivan"},
+        {"short_id": "def56789", "title": "hotfix auth", "author": "Oksana"},
+    ]
+
+
+def test_commit_fingerprint_changes_with_shas():
+    a = [{"short_id": "aaa", "title": "fix a"}]
+    b = [{"short_id": "bbb", "title": "fix a"}]
+    assert commit_fingerprint(1, 1, a) == commit_fingerprint(1, 1, a)
+    assert commit_fingerprint(1, 1, a) != commit_fingerprint(1, 1, b)
+    assert commit_fingerprint(1, 1, a) != commit_fingerprint(2, 1, a)

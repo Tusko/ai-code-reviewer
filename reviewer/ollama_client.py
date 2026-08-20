@@ -41,9 +41,26 @@ def clean_response(text: str) -> str:
     return text
 
 
-def chat(system: str, user: str, deadline_s: int) -> ChatResult:
+def chat(
+    system: str,
+    user: str,
+    deadline_s: int,
+    *,
+    temperature: float = 0.1,
+    seed: int | None = 42,
+) -> ChatResult:
     """Streams a chat completion, aborting the connection at deadline_s."""
     started = time.monotonic()
+    options = {
+        "num_ctx": config.OLLAMA_NUM_CTX,
+        "num_predict": config.OLLAMA_NUM_PREDICT,
+        "num_batch": config.OLLAMA_NUM_BATCH,
+        "temperature": temperature,
+        "top_p": 0.9,
+        "repeat_penalty": 1.05,
+    }
+    if seed is not None:
+        options["seed"] = seed
     body = {
         "model": config.OLLAMA_MODEL,
         "messages": [
@@ -53,15 +70,7 @@ def chat(system: str, user: str, deadline_s: int) -> ChatResult:
         "think": False,
         "stream": True,
         "keep_alive": "24h",
-        "options": {
-            "num_ctx": config.OLLAMA_NUM_CTX,
-            "num_predict": config.OLLAMA_NUM_PREDICT,
-            "num_batch": config.OLLAMA_NUM_BATCH,
-            "temperature": 0.1,
-            "top_p": 0.9,
-            "repeat_penalty": 1.05,
-            "seed": 42,
-        },
+        "options": options,
     }
 
     chunks: list[str] = []
