@@ -107,3 +107,24 @@ def test_snark_defaults_on():
 def test_snark_returns_a_meme_phrase():
     from reviewer.memes import meme_phrases, snark
     assert snark() in meme_phrases
+
+
+def test_env_list_splits_and_trims(monkeypatch):
+    import reviewer.config as cfg
+    monkeypatch.setenv("OR_MODELS", " a/b , c/d:free ,, ")
+    assert cfg.env_list("OR_MODELS", []) == ["a/b", "c/d:free"]
+
+
+def test_env_list_falls_back_when_blank_or_unset(monkeypatch):
+    import reviewer.config as cfg
+    monkeypatch.setenv("OR_MODELS", "   ,  ")
+    assert cfg.env_list("OR_MODELS", ["x"]) == ["x"]
+    monkeypatch.delenv("OR_MODELS", raising=False)
+    assert cfg.env_list("OR_MODELS", ["x"]) == ["x"]
+
+
+def test_fallback_models_default_empty_and_parse(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_FALLBACK_MODELS", raising=False)
+    assert _reload(monkeypatch).OPENROUTER_FALLBACK_MODELS == []
+    cfg = _reload(monkeypatch, OPENROUTER_FALLBACK_MODELS="google/gemma-4-26b-a4b-it")
+    assert cfg.OPENROUTER_FALLBACK_MODELS == ["google/gemma-4-26b-a4b-it"]

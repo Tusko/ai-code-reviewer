@@ -11,6 +11,13 @@ def env_int(name: str, default: int) -> int:
         logging.warning("Invalid int for %s=%r, using default %s", name, raw, default)
         return default
 
+def env_list(name: str, default: list[str]) -> list[str]:
+    raw = os.environ.get(name)
+    if raw is None:
+        return list(default)
+    items = [part.strip() for part in raw.split(",") if part.strip()]
+    return items or list(default)
+
 def env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -44,6 +51,10 @@ OPENROUTER_MODEL = os.environ.get(
 OPENROUTER_BASE_URL = os.environ.get(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1",
 )
+# Extra models, tried in order after OPENROUTER_MODEL within a single request.
+# `:free` variants share one saturated upstream pool and 429 constantly; naming
+# a paid model here lets OpenRouter reroute instead of failing the summary.
+OPENROUTER_FALLBACK_MODELS = env_list("OPENROUTER_FALLBACK_MODELS", [])
 OPENROUTER_MAX_TOKENS = env_int("OPENROUTER_MAX_TOKENS", 512)
 # The voice rewrite has to re-emit the whole finding, *Fix:* code fences
 # included, so it needs far more room than the commit-list roast. Too low and

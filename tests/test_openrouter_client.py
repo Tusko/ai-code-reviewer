@@ -199,3 +199,35 @@ def test_openrouter_transport_error_is_failed(monkeypatch):
     result = chat("sys", "user", deadline_s=30)
     assert result.failed is True
     assert "refused" in result.text
+
+
+def test_openrouter_sends_fallback_models(monkeypatch):
+    monkeypatch.setattr("reviewer.openrouter_client.config.OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("reviewer.openrouter_client.config.OPENROUTER_MODEL", "a:free")
+    monkeypatch.setattr(
+        "reviewer.openrouter_client.config.OPENROUTER_FALLBACK_MODELS", ["a", "b"],
+    )
+    seen = {}
+
+    def post(*a, **k):
+        seen.update(k["json"])
+        return FakeResponse(_ok())
+
+    monkeypatch.setattr("reviewer.openrouter_client.requests.post", post)
+    chat("sys", "user", deadline_s=30)
+    assert seen["model"] == "a:free"
+    assert seen["models"] == ["a:free", "a", "b"]
+
+
+def test_openrouter_omits_models_key_when_unconfigured(monkeypatch):
+    monkeypatch.setattr("reviewer.openrouter_client.config.OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("reviewer.openrouter_client.config.OPENROUTER_FALLBACK_MODELS", [])
+    seen = {}
+
+    def post(*a, **k):
+        seen.update(k["json"])
+        return FakeResponse(_ok())
+
+    monkeypatch.setattr("reviewer.openrouter_client.requests.post", post)
+    chat("sys", "user", deadline_s=30)
+    assert "models" not in seen

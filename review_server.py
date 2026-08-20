@@ -19,6 +19,8 @@ logging.info(
 )
 if config.OPENROUTER_API_KEY:
     _sidorovich_llm = f"openrouter:{config.OPENROUTER_MODEL}"
+    if config.OPENROUTER_FALLBACK_MODELS:
+        _sidorovich_llm += " -> " + " -> ".join(config.OPENROUTER_FALLBACK_MODELS)
 elif config.SIDOROVICH_OLLAMA_FALLBACK:
     _sidorovich_llm = f"ollama:{config.OLLAMA_MODEL} (fallback)"
 else:

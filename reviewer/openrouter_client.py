@@ -54,6 +54,10 @@ def chat(
         "top_p": 0.95,
         "max_tokens": max_tokens or config.OPENROUTER_MAX_TOKENS,
     }
+    if config.OPENROUTER_FALLBACK_MODELS:
+        # OpenRouter walks this list itself when a provider 429s or errors, so
+        # one request already survives a saturated `:free` pool.
+        body["models"] = [config.OPENROUTER_MODEL, *config.OPENROUTER_FALLBACK_MODELS]
     headers = {
         "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -149,7 +153,8 @@ def _attempt(
         elapsed = time.monotonic() - started
         logging.info(
             "OpenRouter done in %.1fs (model=%s reason=%s prompt=%s eval=%s)",
-            elapsed, config.OPENROUTER_MODEL, done_reason, prompt_eval, eval_count,
+            elapsed, payload.get("model") or config.OPENROUTER_MODEL,
+            done_reason, prompt_eval, eval_count,
         )
         return ChatResult(
             text=clean_response(text),
