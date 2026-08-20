@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from reviewer.ollama_client import ChatResult, chat, clean_response
+from reviewer.ollama_client import LGTM_TEXT, ChatResult, chat, clean_response
 
 
 class FakeResponse:
@@ -162,6 +162,12 @@ def test_clean_response_preserves_code_fence_indentation():
     assert "    return q" in clean_response(text)
 
 
-def test_clean_response_swaps_the_for_meme():
-    from reviewer.memes import meme_phrases
-    assert clean_response("The") in meme_phrases
+def test_clean_response_blanks_degenerate_one_token_reply():
+    """A stray "The" must not be dressed up as review content."""
+    assert clean_response("The") == ""
+    assert clean_response("  ok  ") == ""
+
+
+def test_clean_response_normalises_lgtm_without_brackets():
+    assert clean_response("LGTM") == LGTM_TEXT
+    assert clean_response("**LGTM.**") == LGTM_TEXT

@@ -22,6 +22,8 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemma-4-26b-a4b-it:free}
       - OPENROUTER_MAX_TOKENS=${OPENROUTER_MAX_TOKENS:-512}
+      - OPENROUTER_VOICE_MAX_TOKENS=${OPENROUTER_VOICE_MAX_TOKENS:-2048}
+      - SIDOROVICH_OLLAMA_FALLBACK=${SIDOROVICH_OLLAMA_FALLBACK:-false}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always

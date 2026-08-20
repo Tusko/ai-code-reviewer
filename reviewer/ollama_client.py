@@ -1,18 +1,22 @@
 import json
 import logging
-import random
 import re
 import time
 from dataclasses import dataclass
+from typing import Sequence
 
 import requests
 
 from reviewer import config
-from reviewer.memes import meme_phrases
 
 HARMONY_TOKEN_RE = re.compile(r"<\|[^>]*\|?>")
 FENCE_SPLIT_RE = re.compile(r"(```[\s\S]*?```)")
 FINDING_TAGS = ("[BLOCKER]", "[SUGGESTION]", "[NIT]")
+LGTM_TEXT = "LGTM. The changes are clean and follow best practices."
+# `LGTM`, `LGTM.`, `[LGTM]`, `**LGTM.**` — any bare clean verdict.
+BARE_LGTM_RE = re.compile(r"^[*\[\s]*LGTM[\]\s*.!]*$", re.IGNORECASE)
+# Single-token replies the model emits when it gives up mid-generation.
+DEGENERATE_REPLIES = frozenset({"the", "ok", "okay", "none", "n/a", "-", "..."})
 
 
 @dataclass(frozen=True)
@@ -29,7 +33,7 @@ class ChatResult:
 
     @property
     def failed(self) -> bool:
-        return self.done_reason == "error"
+        return self.done_reason in ("error", "ratelimit")
 
 
 def clean_response(text: str) -> str:
@@ -41,10 +45,16 @@ def clean_response(text: str) -> str:
         else:
             pieces.append(part)
     text = "".join(pieces)
-    if text == "The":
-        return random.choice(meme_phrases)
-    if "[LGTM]" in text and not any(tag in text for tag in FINDING_TAGS):
-        return "LGTM. The changes are clean and follow best practices."
+    has_finding = any(tag in text for tag in FINDING_TAGS)
+    # The model bailed and emitted a stray token. Returning anything readable
+    # here would be posted verbatim as a review finding, so return nothing and
+    # let the caller report an error.
+    if not has_finding and text.strip().lower() in DEGENERATE_REPLIES:
+        return ""
+    if not has_finding and BARE_LGTM_RE.match(text.strip()):
+        return LGTM_TEXT
+    if "[LGTM]" in text and not has_finding:
+        return LGTM_TEXT
     return text
 
 
@@ -55,8 +65,13 @@ def chat(
     *,
     temperature: float = 0.1,
     seed: int | None = 42,
+    history: Sequence[dict] = (),
 ) -> ChatResult:
-    """Streams a chat completion, aborting the connection at deadline_s."""
+    """Streams a chat completion, aborting the connection at deadline_s.
+
+    `history` is inserted between the system prompt and `user`, so a retry can
+    show the model the reply it is being asked to correct.
+    """
     started = time.monotonic()
     options = {
         "num_ctx": config.OLLAMA_NUM_CTX,
@@ -72,6 +87,7 @@ def chat(
         "model": config.OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": system},
+            *history,
             {"role": "user", "content": user},
         ],
         "think": False,

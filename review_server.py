@@ -17,12 +17,13 @@ logging.info(
     config.OLLAMA_NUM_PREDICT, config.OLLAMA_NUM_BATCH, config.INCLUDE_FILE_CONTEXT,
     config.PER_FILE_TIMEOUT_S, config.MR_TIMEOUT_S, config.MAX_FILES,
 )
-logging.info(
-    "Sidorovich LLM: %s",
-    f"openrouter:{config.OPENROUTER_MODEL}"
-    if config.OPENROUTER_API_KEY
-    else f"ollama:{config.OLLAMA_MODEL}",
-)
+if config.OPENROUTER_API_KEY:
+    _sidorovich_llm = f"openrouter:{config.OPENROUTER_MODEL}"
+elif config.SIDOROVICH_OLLAMA_FALLBACK:
+    _sidorovich_llm = f"ollama:{config.OLLAMA_MODEL} (fallback)"
+else:
+    _sidorovich_llm = "disabled (no OPENROUTER_API_KEY)"
+logging.info("Sidorovich LLM: %s", _sidorovich_llm)
 
 
 def _handle(job: tuple) -> None:

@@ -54,9 +54,17 @@ RUSSIAN_TELLS_RE = re.compile(
 )
 
 
+FENCE_RE = re.compile(r"```[\s\S]*?```")
+
+
 def looks_too_russian(text: str) -> bool:
-    """True when the reply is Russian with a Ukrainian letter, not surzhyk."""
-    return bool(RUSSIAN_TELLS_RE.search(text or ""))
+    """True when the reply is Russian with a Ukrainian letter, not surzhyk.
+
+    Fenced code is stripped first: `если` or `это` inside a *Fix:* block is the
+    reviewed code speaking, not Sidorovich slipping languages.
+    """
+    prose = FENCE_RE.sub(" ", text or "")
+    return bool(RUSSIAN_TELLS_RE.search(prose))
 
 
 SIDOROVICH_REVIEW_VOICE_PROMPT = f"""Ти Сідорович. Старий злий дев. Пишеш українським суржиком з матюками. jQuery для тебе досі топ.

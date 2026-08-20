@@ -139,7 +139,10 @@ Finding detection always stays on Ollama. With `SNARK=true` and
 `OPENROUTER_API_KEY` set, each inline comment is rewritten as Sidorovich
 (surzhyk, swearing) afterwards — same headings, same `*Fix:*` blocks, only
 the prose changes. If that rewrite fails, rate-limits, or mutates a finding,
-the dry review is posted instead. `SNARK=false` keeps comments professional.
+the dry review is posted instead. After `VOICE_FAILURE_LIMIT` consecutive
+voice failures (free-tier rate limits, mostly) the rest of that MR stays dry,
+so one merge request never mixes voiced and dry comments. `SNARK=false` keeps
+comments professional.
 
 Two situations skip a **full** file-by-file review:
 
@@ -149,9 +152,11 @@ Two situations skip a **full** file-by-file review:
     the team can see what landed without waiting on the per-file loop.
     That roast uses OpenRouter (`OPENROUTER_MODEL`, default
     `google/gemma-4-26b-a4b-it:free`) when `OPENROUTER_API_KEY` is set —
-    local coder models are too stiff for the character. If OpenRouter is
-    missing a key, rate-limits, or errors, Sidorovich falls back to Ollama
-    too.
+    local coder models cannot write surzhyk, and letting them try produces
+    gibberish under Sidorovich's name. Without a key the bot posts a plain
+    commit digest instead; set `SIDOROVICH_OLLAMA_FALLBACK=true` to let the
+    local model attempt the roast anyway. A transient OpenRouter error
+    posts nothing and retries on the next webhook.
 *   The merge request's diff is byte-for-byte identical to the diff from its
     last completed review (tracked by `DEDUPE_CACHE_SIZE` most-recent
     fingerprints). This is a cost-saving skip on repeat webhooks, not a

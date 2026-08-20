@@ -45,6 +45,15 @@ OPENROUTER_BASE_URL = os.environ.get(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1",
 )
 OPENROUTER_MAX_TOKENS = env_int("OPENROUTER_MAX_TOKENS", 512)
+# The voice rewrite has to re-emit the whole finding, *Fix:* code fences
+# included, so it needs far more room than the commit-list roast. Too low and
+# every multi-finding review stops at finish_reason=length and silently posts
+# dry.
+OPENROUTER_VOICE_MAX_TOKENS = env_int("OPENROUTER_VOICE_MAX_TOKENS", 2048)
+# qwen2.5-coder and friends cannot write Ukrainian surzhyk; letting them try
+# produces gibberish in Sidorovich's name. Off means: no OpenRouter, no roast —
+# release/hotfix MRs get a plain commit digest instead.
+SIDOROVICH_OLLAMA_FALLBACK = env_bool("SIDOROVICH_OLLAMA_FALLBACK", False)
 
 # Tone. Off keeps summaries and inline comments dry. On adds a meme to the
 # summary and, when OpenRouter is keyed, rewrites inline findings as

@@ -1,3 +1,4 @@
+import re
 import importlib
 
 import pytest
@@ -63,8 +64,16 @@ def test_env_int_falls_back_on_garbage(monkeypatch):
 
 def test_memes_preserved():
     from reviewer.memes import meme_phrases
-    assert len(meme_phrases) == 41
+    assert len(meme_phrases) > 40
     assert "Nihuyasobi na oborot." in meme_phrases
+    assert len(set(meme_phrases)) == len(meme_phrases)
+
+
+def test_no_meme_phrase_was_glued_by_a_missing_comma():
+    """A dropped comma silently concatenates two adjacent literals."""
+    from reviewer.memes import meme_phrases
+    for phrase in meme_phrases:
+        assert not re.search(r"[.!?][\u0410-\u042f\u0406\u0407\u0404A-Z]", phrase), phrase
 
 
 def test_openrouter_defaults(monkeypatch):

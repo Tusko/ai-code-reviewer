@@ -125,3 +125,14 @@ def test_build_commit_summary_prompt_caps_long_lists():
     assert "- c39 (dev)" in text
     assert "- c44 (dev)" not in text
     assert "ще 5 коміт" in text
+
+
+def test_looks_too_russian_ignores_fenced_code():
+    """`если` inside a *Fix:* block is the reviewed code, not Sidorovich."""
+    assert not looks_too_russian(
+        "Тут ти обісрався з валідацією.\n"
+        "*Fix:*\n"
+        "```python\n"
+        'if lang == "если": raise ValueError("это")\n'
+        "```"
+    )

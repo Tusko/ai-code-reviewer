@@ -8,10 +8,14 @@ from reviewer import config, gitlab_client, openrouter_client, prompt as prompt_
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.filters import is_reviewable
 from reviewer.memes import snark
-from reviewer.ollama_client import ChatResult, chat
+from reviewer.ollama_client import LGTM_TEXT, ChatResult, chat
 from reviewer.queue import DedupeCache
 
 VOICE_DEADLINE_S = 20
+# Consecutive failed voice calls before the rest of the MR stays dry. Free-tier
+# OpenRouter models rate-limit mid-review; retrying every file just makes half
+# the comments Sidorovich and half of them dry.
+VOICE_FAILURE_LIMIT = 2
 FINDING_TAGS = ("[BLOCKER]", "[SUGGESTION]", "[NIT]")
 FENCE_BODY_RE = re.compile(r"```(?:\w*)\n?(.*?)```", re.DOTALL)
 
@@ -21,6 +25,28 @@ class FileOutcome:
     path: str
     status: str   # "reviewed" | "clean" | "skipped" | "error"
     detail: str
+
+
+class VoiceState:
+    """Per-MR circuit breaker for the Sidorovich voice rewrite."""
+
+    def __init__(self) -> None:
+        self.failures = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self.failures < VOICE_FAILURE_LIMIT
+
+    def record_failure(self) -> None:
+        self.failures += 1
+        if not self.enabled:
+            logging.warning(
+                "Sidorovich voice disabled for the rest of this MR after %s "
+                "consecutive failures", self.failures,
+            )
+
+    def record_success(self) -> None:
+        self.failures = 0
 
 
 dedupe = DedupeCache()
@@ -65,7 +91,9 @@ def build_prompt_ladder(path: str, hunks: Sequence[Hunk], context: str) -> list[
     return ladder
 
 
-def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
+def review_file(
+    mr, file_diff: FileDiff, context: str, voice: "VoiceState | None" = None,
+) -> FileOutcome:
     path = file_diff.new_path
     ladder = build_prompt_ladder(path, file_diff.hunks, context)
     attempts = [(level, text) for level, text in ladder if prompt_mod.fits(text)]
@@ -108,10 +136,10 @@ def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
             return FileOutcome(path, "error", "no response from model")
         if result.done_reason == "length":
             truncated = True
-        if result.text and not result.text.startswith("LGTM."):
+        if result.text and not is_lgtm(result.text):
             finding = result.text
             if result.done_reason != "length":
-                finding = flavor_review(finding)
+                finding = flavor_review(finding, voice)
             bodies.append(finding)
 
     if not bodies:
@@ -133,6 +161,14 @@ def review_file(mr, file_diff: FileDiff, context: str) -> FileOutcome:
     return FileOutcome(path, "reviewed", detail)
 
 
+def is_lgtm(text: str) -> bool:
+    """True for a clean verdict in any of the shapes the model emits."""
+    stripped = (text or "").strip()
+    if any(tag in stripped for tag in FINDING_TAGS):
+        return False
+    return stripped.startswith(LGTM_TEXT) or stripped.upper().startswith("LGTM")
+
+
 def _fence_bodies(text: str) -> list[str]:
     return FENCE_BODY_RE.findall(text)
 
@@ -143,53 +179,75 @@ def preserves_findings(original: str, flavored: str) -> bool:
         if original.count(tag) != flavored.count(tag):
             return False
     original_fences = _fence_bodies(original)
-    return not original_fences or _fence_bodies(flavored) == original_fences
+    flavored_fences = _fence_bodies(flavored)
+    if original_fences:
+        return flavored_fences == original_fences
+    # No fences to preserve, but the rewrite must not invent a *Fix:* block —
+    # code Sidorovich made up is worse than no code at all.
+    return not flavored_fences
 
 
-def flavor_review(text: str) -> str:
+def _voice_chat(user: str, history: Sequence[dict] = ()) -> ChatResult:
+    return openrouter_client.chat(
+        prompt_mod.SIDOROVICH_REVIEW_VOICE_PROMPT,
+        user,
+        deadline_s=VOICE_DEADLINE_S,
+        # A rewrite must stay faithful to the finding. High temperature here is
+        # what makes Sidorovich invent bugs that are not in the diff.
+        temperature=0.5,
+        max_tokens=config.OPENROUTER_VOICE_MAX_TOKENS,
+        history=history,
+    )
+
+
+def flavor_review(text: str, voice: "VoiceState | None" = None) -> str:
     """Rewrite a dry finding as Sidorovich. Voice is extra: never block or replace."""
     if not config.SNARK or not config.OPENROUTER_API_KEY:
         return text
+    if voice is not None and not voice.enabled:
+        return text
+
     result = prefer_ukrainian(
-        openrouter_client.chat(
-            prompt_mod.SIDOROVICH_REVIEW_VOICE_PROMPT,
-            text,
-            deadline_s=VOICE_DEADLINE_S,
-            temperature=0.8,
-        ),
-        lambda: openrouter_client.chat(
-            prompt_mod.SIDOROVICH_REVIEW_VOICE_PROMPT,
-            text + "\n\n" + prompt_mod.SIDOROVICH_UKRAINIAN_RETRY,
-            deadline_s=VOICE_DEADLINE_S,
-            temperature=0.8,
+        _voice_chat(text),
+        lambda bad: _voice_chat(
+            prompt_mod.SIDOROVICH_UKRAINIAN_RETRY,
+            history=(
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": bad},
+            ),
         ),
     )
     flavored = (result.text or "").strip()
+
+    def keep_dry(why: str) -> str:
+        logging.warning("Sidorovich voice rewrite skipped (%s); posting dry review", why)
+        if voice is not None:
+            voice.record_failure()
+        return text
+
     if result.failed or result.done_reason == "length" or not flavored:
-        logging.warning(
-            "Sidorovich voice rewrite skipped (%s); posting dry review",
-            result.done_reason,
-        )
-        return text
+        return keep_dry(result.done_reason)
     if not preserves_findings(text, flavored):
-        logging.warning(
-            "Sidorovich voice rewrite changed findings; posting dry review",
-        )
-        return text
+        return keep_dry("rewrite changed findings")
     if prompt_mod.looks_too_russian(flavored):
-        logging.warning(
-            "Sidorovich voice still Russian after retry; posting dry review",
-        )
-        return text
+        return keep_dry("still Russian after retry")
+
+    if voice is not None:
+        voice.record_success()
     return flavored
 
 
 def prefer_ukrainian(result: ChatResult, retry) -> ChatResult:
-    """One retry when Sidorovich slipped into Russian."""
+    """One retry when Sidorovich slipped into Russian.
+
+    `retry` is called with the offending reply so it can be replayed to the
+    model as an assistant turn; scolding a model that cannot see what it wrote
+    mostly reproduces the same mistake.
+    """
     if result.failed or not prompt_mod.looks_too_russian(result.text):
         return result
     logging.warning("Sidorovich wrote Russian; retrying in Ukrainian")
-    retried = retry()
+    retried = retry(result.text)
     if retried.failed or not (retried.text or "").strip():
         return result
     return retried
@@ -222,31 +280,58 @@ def render_summary(outcomes: Sequence[FileOutcome]) -> str:
     return "\n".join(lines)
 
 
-def summary_chat(system: str, user: str, deadline_s: int) -> ChatResult:
-    """Sidorovich summaries: OpenRouter first, local Ollama as fallback."""
+def render_commit_digest(commits: Sequence[dict]) -> str:
+    """Plain commit list, posted when Sidorovich has no model that can voice it."""
+    lines = ["**Release/hotfix — full review skipped.** Commits:"]
+    for commit in list(commits)[:prompt_mod.MAX_COMMITS_IN_PROMPT]:
+        title = (commit.get("title") or "").strip() or "(no message)"
+        author = commit.get("author") or "unknown"
+        lines.append(f"- {title} — _{author}_")
+    omitted = len(commits) - min(len(commits), prompt_mod.MAX_COMMITS_IN_PROMPT)
+    if omitted > 0:
+        lines.append(f"- …and {omitted} more commit(s)")
+    return "\n".join(lines)
+
+
+def summary_chat(
+    system: str, user: str, deadline_s: int, history: Sequence[dict] = (),
+) -> ChatResult:
+    """Sidorovich summaries: OpenRouter first, local Ollama only when allowed."""
     if config.OPENROUTER_API_KEY:
         result = openrouter_client.chat(
-            system, user, deadline_s, temperature=1.0,
+            system, user, deadline_s, temperature=1.0, history=history,
         )
         if not result.failed and result.text.strip():
             return result
         logging.warning(
-            "OpenRouter summary failed (%s); falling back to Ollama %s",
-            result.done_reason, config.OLLAMA_MODEL,
+            "OpenRouter summary failed (%s)", result.done_reason,
         )
-    return chat(system, user, deadline_s, temperature=0.95, seed=None)
+    if not config.SIDOROVICH_OLLAMA_FALLBACK:
+        # A code model writing Ukrainian surzhyk produces gibberish under
+        # Sidorovich's name. Report the voice as unavailable instead.
+        return ChatResult(
+            text="",
+            done_reason="unavailable",
+            prompt_eval_count=0,
+            eval_count=0,
+            elapsed_s=0.0,
+        )
+    logging.warning("Falling back to Ollama %s for the summary", config.OLLAMA_MODEL)
+    return chat(
+        system, user, deadline_s, temperature=0.95, seed=None, history=history,
+    )
 
 
 def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
     """Skip full review; post a Sidorovich commit-list roast instead."""
     commits = gitlab_client.fetch_commits(mr)
+    if not commits:
+        logging.info("MR !%s source branch is release/ or hotfix/; no commits to summarise", mr_iid)
+        return
+
     fingerprint = gitlab_client.commit_fingerprint(project_id, mr_iid, commits)
     if not force and dedupe.seen(fingerprint):
         logging.info("MR !%s release/hotfix commits unchanged; skipping", mr_iid)
-        return
-
-    if not commits:
-        logging.info("MR !%s source branch is release/ or hotfix/; no commits to summarise", mr_iid)
         return
 
     user = prompt_mod.build_commit_summary_prompt(commits)
@@ -256,12 +341,23 @@ def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
             user,
             deadline_s=config.PER_FILE_TIMEOUT_S,
         ),
-        lambda: summary_chat(
+        lambda bad: summary_chat(
             prompt_mod.SIDOROVICH_SYSTEM_PROMPT,
-            user + "\n\n" + prompt_mod.SIDOROVICH_UKRAINIAN_RETRY,
+            prompt_mod.SIDOROVICH_UKRAINIAN_RETRY,
             deadline_s=config.PER_FILE_TIMEOUT_S,
+            history=(
+                {"role": "user", "content": user},
+                {"role": "assistant", "content": bad},
+            ),
         ),
     )
+    if result.done_reason == "unavailable":
+        # Not a transient failure — no model here can do the voice. Post the
+        # plain digest and dedupe it, rather than retrying on every webhook.
+        logging.info("MR !%s: no Sidorovich voice available; posting commit digest", mr_iid)
+        gitlab_client.post_note(mr, render_commit_digest(commits))
+        dedupe.remember(fingerprint)
+        return
     if result.failed or not result.text.strip():
         logging.error(
             "Sidorovich summary failed for MR !%s: %s", mr_iid, result.done_reason,
@@ -290,6 +386,7 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             return
 
         kept, outcomes = select_files(file_diffs)
+        voice = VoiceState()
 
         if not kept:
             logging.info("MR !%s: nothing reviewable", mr_iid)
@@ -316,7 +413,7 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                     )
 
             try:
-                outcomes.append(review_file(mr, file_diff, context))
+                outcomes.append(review_file(mr, file_diff, context, voice))
             except Exception as exc:
                 logging.error("Review failed for %s: %s", file_diff.new_path, exc)
                 outcomes.append(FileOutcome(file_diff.new_path, "error", str(exc)[:120]))

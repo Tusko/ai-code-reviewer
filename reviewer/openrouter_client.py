@@ -1,5 +1,6 @@
 import logging
 import time
+from typing import Sequence
 
 import requests
 
@@ -13,8 +14,14 @@ def chat(
     deadline_s: int,
     *,
     temperature: float = 1.0,
+    max_tokens: int | None = None,
+    history: Sequence[dict] = (),
 ) -> ChatResult:
-    """One-shot OpenRouter chat completion for Sidorovich voice."""
+    """One-shot OpenRouter chat completion for Sidorovich voice.
+
+    `history` is inserted between the system prompt and `user`, so a retry can
+    show the model the reply it is being asked to correct.
+    """
     started = time.monotonic()
     if not config.OPENROUTER_API_KEY:
         return ChatResult(
@@ -29,11 +36,12 @@ def chat(
         "model": config.OPENROUTER_MODEL,
         "messages": [
             {"role": "system", "content": system},
+            *history,
             {"role": "user", "content": user},
         ],
         "temperature": temperature,
         "top_p": 0.95,
-        "max_tokens": config.OPENROUTER_MAX_TOKENS,
+        "max_tokens": max_tokens or config.OPENROUTER_MAX_TOKENS,
     }
     headers = {
         "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
@@ -57,10 +65,13 @@ def chat(
 
         if not response.ok:
             message = _error_message(payload) or response.text[:500]
+            # Free-tier models rate-limit hard. Tag it distinctly so callers can
+            # stop hammering OpenRouter for the rest of the merge request.
+            reason = "ratelimit" if response.status_code == 429 else "error"
             logging.error("OpenRouter returned %s: %s", response.status_code, message)
             return ChatResult(
                 text=f"Error communicating with OpenRouter: {message}",
-                done_reason="error",
+                done_reason=reason,
                 prompt_eval_count=0,
                 eval_count=0,
                 elapsed_s=time.monotonic() - started,

@@ -425,8 +425,9 @@ def test_prefer_ukrainian_retries_once():
     second = _chat_result("Опять цей висер без спросу.")
     calls = {"n": 0}
 
-    def retry():
+    def retry(bad):
         calls["n"] += 1
+        assert "высер" in bad, "retry must see the reply it is correcting"
         return second
 
     assert prefer_ukrainian(first, retry).text == second.text
@@ -467,3 +468,75 @@ def test_flavor_review_keeps_dry_when_still_russian(monkeypatch):
         lambda *a, **k: _chat_result(russian),
     )
     assert flavor_review(DRY_FINDING) == DRY_FINDING
+
+
+def test_preserves_findings_rejects_invented_fix_block():
+    """A rewrite must not conjure code that was never in the review."""
+    dry = "**🟡 [SUGGESTION]**\nThe retry loop never backs off."
+    invented = dry + "\n*Fix:*\n```python\ntime.sleep(2 ** attempt)\n```"
+    assert preserves_findings(dry, invented) is False
+
+
+def test_flavor_review_uses_faithful_temperature_and_voice_budget(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("reviewer.config.OPENROUTER_VOICE_MAX_TOKENS", 2048)
+    seen = {}
+
+    def fake_chat(system, user, deadline_s, **kwargs):
+        seen.update(kwargs)
+        return _chat_result(VOICED_FINDING)
+
+    monkeypatch.setattr(pipeline.openrouter_client, "chat", fake_chat)
+    flavor_review(DRY_FINDING)
+    assert seen["temperature"] == 0.5
+    assert seen["max_tokens"] == 2048
+
+
+def test_voice_is_disabled_for_the_rest_of_the_mr_after_repeated_failures(monkeypatch):
+    """Free-tier rate limits must not make half the MR voiced and half dry."""
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
+    calls = []
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat",
+        lambda *a, **k: calls.append(1) or _chat_result("nope", done_reason="ratelimit"),
+    )
+
+    voice = pipeline.VoiceState()
+    for _ in range(5):
+        assert flavor_review(DRY_FINDING, voice) == DRY_FINDING
+    assert len(calls) == pipeline.VOICE_FAILURE_LIMIT
+    assert voice.enabled is False
+
+
+def test_voice_success_resets_the_failure_counter(monkeypatch):
+    monkeypatch.setattr("reviewer.config.SNARK", True)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
+    replies = [
+        _chat_result("nope", done_reason="ratelimit"),
+        _chat_result(VOICED_FINDING),
+        _chat_result("nope", done_reason="ratelimit"),
+    ]
+    monkeypatch.setattr(
+        pipeline.openrouter_client, "chat", lambda *a, **k: replies.pop(0),
+    )
+
+    voice = pipeline.VoiceState()
+    flavor_review(DRY_FINDING, voice)
+    flavor_review(DRY_FINDING, voice)
+    flavor_review(DRY_FINDING, voice)
+    assert voice.enabled is True
+
+
+def test_review_file_skips_bare_lgtm_without_punctuation(monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "chat",
+        lambda system, user, deadline_s: _chat_result("LGTM"),
+    )
+    monkeypatch.setattr(
+        pipeline.gitlab_client, "post_inline",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("nothing to post")),
+    )
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+    assert outcome.status == "clean"
