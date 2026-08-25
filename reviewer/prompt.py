@@ -139,18 +139,22 @@ def estimate_tokens(text: str) -> int:
 
 
 def input_token_budget() -> int:
-    """Tokens available for the user prompt after system prompt and output reserve."""
+    """Tokens available for the user prompt after system prompt and output reserve.
+
+    Sized from the review backend, not from Ollama: review runs on OpenRouter
+    and OLLAMA_NUM_CTX now governs only the Sidorovich voice fallback.
+    """
     budget = (
-        config.OLLAMA_NUM_CTX
-        - config.OLLAMA_NUM_PREDICT
+        config.REVIEW_CONTEXT_TOKENS
+        - config.REVIEW_MAX_OUTPUT_TOKENS
         - estimate_tokens(SYSTEM_PROMPT)
         - config.PROMPT_TOKEN_BUFFER
     )
     if budget < 256:
         logging.warning(
-            "OLLAMA_NUM_CTX=%s leaves only ~%s input tokens; raise num_ctx or "
-            "lower OLLAMA_NUM_PREDICT",
-            config.OLLAMA_NUM_CTX, budget,
+            "REVIEW_CONTEXT_TOKENS=%s leaves only ~%s input tokens; raise it or "
+            "lower REVIEW_MAX_OUTPUT_TOKENS",
+            config.REVIEW_CONTEXT_TOKENS, budget,
         )
     return max(256, budget)
 

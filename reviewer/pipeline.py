@@ -50,6 +50,9 @@ def select_files(file_diffs: Sequence[FileDiff]) -> tuple[list[FileDiff], list[F
     return kept, outcomes
 
 
+# With a 262k-token review context essentially every file fits at L1, so the L2
+# per-hunk rung no longer fires in practice. It is kept because it is what
+# guarantees no file is silently dropped for being too large.
 def build_prompt_ladder(path: str, hunks: Sequence[Hunk], context: str) -> list[tuple[str, str]]:
     """Ordered attempts, cheapest-viable first. L3 is the absence of any fitting level."""
     ladder: list[tuple[str, str]] = []

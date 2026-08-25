@@ -1,3 +1,5 @@
+from reviewer import config
+from reviewer import prompt as prompt_mod
 from reviewer.diff_parser import Hunk
 from reviewer.prompt import (
     SYSTEM_PROMPT, SIDOROVICH_SYSTEM_PROMPT, SIDOROVICH_REVIEW_VOICE_PROMPT,
@@ -64,7 +66,7 @@ def test_estimate_tokens_is_never_zero():
 def test_input_token_budget_leaves_room_for_output(monkeypatch):
     budget = input_token_budget()
     assert budget > 0
-    assert budget < 8192
+    assert budget < config.REVIEW_CONTEXT_TOKENS
 
 
 def test_fits_rejects_oversized_prompt():
@@ -136,3 +138,25 @@ def test_looks_too_russian_ignores_fenced_code():
         'if lang == "если": raise ValueError("это")\n'
         "```"
     )
+
+
+def test_input_token_budget_follows_review_context(monkeypatch):
+    monkeypatch.setattr("reviewer.config.REVIEW_CONTEXT_TOKENS", 262144)
+    monkeypatch.setattr("reviewer.config.REVIEW_MAX_OUTPUT_TOKENS", 4096)
+    monkeypatch.setattr("reviewer.config.PROMPT_TOKEN_BUFFER", 128)
+    budget = prompt_mod.input_token_budget()
+    assert budget > 250_000
+
+
+def test_input_token_budget_ignores_ollama_context(monkeypatch):
+    monkeypatch.setattr("reviewer.config.REVIEW_CONTEXT_TOKENS", 262144)
+    monkeypatch.setattr("reviewer.config.REVIEW_MAX_OUTPUT_TOKENS", 4096)
+    before = prompt_mod.input_token_budget()
+    monkeypatch.setattr("reviewer.config.OLLAMA_NUM_CTX", 512)
+    assert prompt_mod.input_token_budget() == before
+
+
+def test_input_token_budget_floors_at_256(monkeypatch):
+    monkeypatch.setattr("reviewer.config.REVIEW_CONTEXT_TOKENS", 100)
+    monkeypatch.setattr("reviewer.config.REVIEW_MAX_OUTPUT_TOKENS", 90)
+    assert prompt_mod.input_token_budget() == 256
