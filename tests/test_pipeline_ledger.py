@@ -133,6 +133,7 @@ def test_unchanged_diff_posts_absolutely_nothing(harness, monkeypatch):
     pipeline.review_merge_request(1, 1)
     assert recorder.notes == []
     assert recorder.inline == []
+    assert state["ledger"].head == "abc1234", "the head must still be stamped"
 
 
 def test_reviewed_hunks_are_recorded(harness, monkeypatch):
@@ -150,3 +151,39 @@ def test_reviewed_hunks_are_recorded(harness, monkeypatch):
     pipeline.review_merge_request(1, 1)
     assert hunk_key("a.py", diff.hunks[0]) in state["ledger"].hunks
     assert state["saves"] >= 2, "the ledger must be saved incrementally"
+
+
+def _clean_review(monkeypatch):
+    """Stubs review_file at the real 5-arg signature, always returning clean."""
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_file",
+        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+            file_diff.new_path, "clean", "",
+        ),
+    )
+
+
+def test_an_unchanged_re_push_costs_nothing(harness, monkeypatch):
+    recorder, _ = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    _clean_review(monkeypatch)
+    diffs = [fd("a.py")]
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: diffs)
+
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.notes) == 1
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.notes) == 1, "an unchanged re-push must post nothing at all"
+
+
+def test_a_changed_diff_is_reviewed_again(harness, monkeypatch):
+    recorder, _ = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    _clean_review(monkeypatch)
+    diffs = [fd("a.py", hunks=(Hunk(1, 1, (" ctx", "+one")),))]
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: diffs)
+
+    pipeline.review_merge_request(1, 1)
+    diffs[0] = fd("a.py", hunks=(Hunk(1, 1, (" ctx", "+two")),))
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.notes) == 2, "new content must earn a fresh review"

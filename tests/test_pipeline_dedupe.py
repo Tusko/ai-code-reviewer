@@ -69,26 +69,6 @@ def test_release_and_hotfix_branches_are_skipped():
     assert pipeline.should_skip_branch("hotfix/release/patch") is True
 
 
-def test_changed_diff_is_reviewed_again(monkeypatch):
-    calls = []
-    mr = FakeMR()
-    diffs = [FD]
-
-    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr", lambda p, i: (object(), mr))
-    monkeypatch.setattr(pipeline.gitlab_client, "fetch_file_diffs", lambda m: diffs)
-    monkeypatch.setattr(pipeline.gitlab_client, "post_note",
-                        lambda m, body: calls.append(body))
-    monkeypatch.setattr(pipeline, "review_file",
-                        lambda mr_, fd, ctx: pipeline.FileOutcome(fd.new_path, "clean", ""))
-    monkeypatch.setattr(pipeline, "dedupe", pipeline.DedupeCache(maxsize=8))
-
-    pipeline.review_merge_request(1, 1)
-    diffs[0] = FileDiff("a.py", "a.py", False, False, False, False,
-                        (Hunk(1, 1, (" x", "+z")),))
-    pipeline.review_merge_request(1, 1)
-    assert len(calls) == 2
-
-
 def test_skipped_branch_posts_sidorovich_summary(monkeypatch):
     notes = []
     review_calls = []
