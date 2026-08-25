@@ -248,6 +248,21 @@ def render_oversized(count: int) -> str:
     return "\n".join(lines)
 
 
+def render_budget_exhausted() -> str:
+    """The closing comment when an MR has used its whole budget."""
+    lines = []
+    if config.SNARK:
+        lines.append(f"_{snark()}_\n")
+    lines.append(
+        f"**Ліміт вичерпано: {config.MR_COMMENT_BUDGET} коментарів у цьому MR.**\n"
+    )
+    lines.append(
+        "Далі мовчу до мержу. Розгреби те, що вже написав, а тоді кинь `/review` "
+        "у коментар — лічильник обнулиться.\n"
+    )
+    return "\n".join(lines)
+
+
 def render_commit_digest(commits: Sequence[dict]) -> str:
     """Plain commit list, posted when Sidorovich has no model that can voice it."""
     lines = ["**Release/hotfix — full review skipped.** Commits:"]
@@ -406,6 +421,13 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                     file_diff.new_path, "skipped", "review backend rate limited",
                 ))
                 continue
+            if store.ledger.remaining() <= 1:
+                # The last slot is reserved for the closing note, so the run can
+                # always tell the reader why it stopped.
+                outcomes.append(FileOutcome(
+                    file_diff.new_path, "skipped", "MR comment budget reached",
+                ))
+                continue
 
             context = ""
             if config.INCLUDE_FILE_CONTEXT:
@@ -438,8 +460,16 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             # would post every one of them again.
             store.save()
 
-        gitlab_client.post_note(mr, render_summary(outcomes))
-        store.ledger = store.ledger.spend(1).at_head(head_sha)
+        if store.ledger.remaining() <= 1:
+            gitlab_client.post_note(mr, render_budget_exhausted())
+            store.ledger = store.ledger.spend(1).mute().at_head(head_sha)
+            logging.warning(
+                "MR !%s hit MR_COMMENT_BUDGET=%s; muted until /review",
+                mr_iid, config.MR_COMMENT_BUDGET,
+            )
+        else:
+            gitlab_client.post_note(mr, render_summary(outcomes))
+            store.ledger = store.ledger.spend(1).at_head(head_sha)
         store.save()
         logging.info("MR !%s reviewed in %.1fs", mr_iid, time.monotonic() - started)
 

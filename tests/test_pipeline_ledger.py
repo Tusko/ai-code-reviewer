@@ -187,3 +187,88 @@ def test_a_changed_diff_is_reviewed_again(harness, monkeypatch):
     diffs[0] = fd("a.py", hunks=(Hunk(1, 1, (" ctx", "+two")),))
     pipeline.review_merge_request(1, 1)
     assert len(recorder.notes) == 2, "new content must earn a fresh review"
+
+
+def test_budget_exhaustion_posts_one_final_note_and_mutes(harness, monkeypatch):
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.MR_COMMENT_BUDGET", 3)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(10)],
+    )
+    pipeline.review_merge_request(1, 1)
+
+    assert len(recorder.inline) == 2, "budget 3 leaves 2 inline plus a final note"
+    assert len(recorder.notes) == 1
+    assert "ліміт" in recorder.notes[0].lower()
+    assert state["ledger"].muted is True
+
+
+def test_muted_mr_ignores_a_plain_push(harness, monkeypatch):
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    state["ledger"] = Ledger(muted=True)
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [fd("a.py")])
+    pipeline.review_merge_request(1, 1)
+    assert recorder.notes == []
+    assert recorder.inline == []
+
+
+def test_force_review_clears_mute_and_resets_budget(harness, monkeypatch):
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.MR_COMMENT_BUDGET", 30)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult("[LGTM]", "stop", 0, 0, 0.0),
+    )
+    state["ledger"] = Ledger(muted=True, posted=30)
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [fd("a.py")])
+    pipeline.review_merge_request(1, 1, force=True)
+    assert state["ledger"].muted is False
+    assert len(recorder.notes) == 1
+
+
+def test_unreadable_ledger_skips_the_run(harness, monkeypatch):
+    """Fail closed. An empty-ledger fallback would re-review the whole MR."""
+    recorder, state = harness
+    from reviewer.ledger import LedgerUnavailable
+
+    def _boom(mr):
+        raise LedgerUnavailable("gitlab is down")
+
+    monkeypatch.setattr("reviewer.pipeline.LedgerStore.load", staticmethod(_boom))
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [fd("a.py")])
+    pipeline.review_merge_request(1, 1)
+    assert recorder.notes == []
+    assert recorder.inline == []
+
+
+def test_rate_limited_files_are_not_recorded(harness, monkeypatch):
+    """A rate-limited file must be retried on the next push, so its hunks
+    must not enter the ledger."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.MR_COMMENT_BUDGET", 30)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult("", "ratelimit", 0, 0, 0.0),
+    )
+    diffs = [fd(f"f{i}.py") for i in range(5)]
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: diffs)
+    pipeline.review_merge_request(1, 1)
+
+    assert state["ledger"].hunks == (), "no hunk may be recorded on a rate limit"
+    assert recorder.inline == []
+    summary = recorder.notes[0]
+    assert "rate limited" in summary
