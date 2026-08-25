@@ -1,12 +1,14 @@
 import pytest
 
 from reviewer import pipeline
+from reviewer.chat_types import ChatResult
 from reviewer.diff_parser import FileDiff, Hunk
-from reviewer.ollama_client import ChatResult
 from reviewer.pipeline import (
-    FileOutcome, build_prompt_ladder, flavor_review, prefer_ukrainian,
-    preserves_findings, render_summary, review_file,
+    FileOutcome, build_prompt_ladder, render_summary, review_file,
     review_merge_request, select_files,
+)
+from reviewer.voice import (
+    VOICE_FAILURE_LIMIT, flavor_review, prefer_ukrainian, preserves_findings,
 )
 
 
@@ -506,7 +508,7 @@ def test_voice_is_disabled_for_the_rest_of_the_mr_after_repeated_failures(monkey
     voice = pipeline.VoiceState()
     for _ in range(5):
         assert flavor_review(DRY_FINDING, voice) == DRY_FINDING
-    assert len(calls) == pipeline.VOICE_FAILURE_LIMIT
+    assert len(calls) == VOICE_FAILURE_LIMIT
     assert voice.enabled is False
 
 
