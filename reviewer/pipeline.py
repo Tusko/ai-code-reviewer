@@ -32,14 +32,15 @@ class ReviewState:
         return self.ratelimits < REVIEW_FAILURE_LIMIT
 
     def record(self, done_reason: str) -> None:
-        # "error" counts too: a missing API key fails every single file with
-        # done_reason="error", and without this the breaker never trips and
-        # the run calls out once per file for nothing.
-        if done_reason in ("ratelimit", "error"):
+        # Only rate limits. "error" is per-file and content-dependent -- a 400
+        # on one oversized payload, a moderation refusal -- and counting it
+        # meant two unlucky files in a row stopped every later run of that MR
+        # for good, since select_files sorts deterministically.
+        if done_reason == "ratelimit":
             self.ratelimits += 1
             if not self.open:
                 logging.warning(
-                    "Review stopped for this MR after %s consecutive failures",
+                    "Review stopped for this MR after %s consecutive rate limits",
                     self.ratelimits,
                 )
         else:
@@ -188,11 +189,20 @@ def review_file(
     if truncated:
         body += "\n\n_⚠️ This review was truncated at the output token limit and may be incomplete._"
     anchor = file_diff.hunks[0].first_added_line()
-    posted = False
-    if anchor is not None:
-        posted = gitlab_client.post_inline(mr, path, anchor, body)
-    if not posted:
-        gitlab_client.post_note(mr, body)
+    try:
+        posted = False
+        if anchor is not None:
+            posted = gitlab_client.post_inline(mr, path, anchor, body)
+        if not posted:
+            gitlab_client.post_note(mr, body)
+    except Exception as exc:
+        # post_inline only catches GitlabError; a connection reset while reading
+        # the response of a discussion GitLab already created escapes it. The
+        # comment may well be public, so this counts as reviewed and keeps its
+        # slot charged. Paying twice for one comment is survivable; posting one
+        # for free is how the ceiling silently disengages.
+        logging.error("Post failed for %s (the comment may exist anyway): %s", path, exc)
+        return FileOutcome(path, "reviewed", "post failed; comment may be duplicated")
 
     detail = l2_detail if l2_detail else f"{len(bodies)} response(s)"
     if truncated:
@@ -310,17 +320,6 @@ def summary_chat(
     return ollama_client.chat(
         system, user, deadline_s, temperature=0.95, seed=None, history=history,
     )
-
-
-def backend_is_dead(outcomes: Sequence[FileOutcome]) -> bool:
-    """Whether every file that reached the model came back an error.
-
-    Distinguishes "the review backend is broken" from "we ran out of time or
-    budget". The first is transient and must cost nothing; the second is worth
-    a summary, because the reader has to know the MR was not fully looked at.
-    """
-    attempted = [o for o in outcomes if o.status in ("reviewed", "clean", "error")]
-    return bool(attempted) and all(o.status == "error" for o in attempted)
 
 
 def _charge(store, mr_iid: int, head: str = None) -> bool:
@@ -553,6 +552,9 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             except Exception as exc:
                 logging.error("Review failed for %s: %s", file_diff.new_path, exc)
                 outcomes.append(FileOutcome(file_diff.new_path, "error", str(exc)[:120]))
+                # Safe only because review_file swallows its own post failures:
+                # nothing can have been posted by the time we get here, so the
+                # slot really is unspent.
                 store.ledger = store.ledger.refund()
                 continue
 
@@ -567,6 +569,7 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 store.ledger = store.ledger.refund()
             _save_quietly(store, mr_iid)
 
+        settled = any(o.status in ("reviewed", "clean") for o in outcomes)
         if store.ledger.remaining() <= 1:
             store.ledger = store.ledger.mute()
             if _charge(store, mr_iid, head=head_sha):
@@ -575,17 +578,16 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 "MR !%s hit MR_COMMENT_BUDGET=%s; muted until /review",
                 mr_iid, config.MR_COMMENT_BUDGET,
             )
-        elif backend_is_dead(outcomes):
-            # Every file we actually sent to the model came back an error: the
-            # backend is down, rate limited or unconfigured. A summary saying so
-            # would cost a slot per push and mute the MR over an outage that
-            # fixes itself, so say nothing. Nothing was recorded either, so the
-            # next push retries the lot.
+        elif not settled and head_sha and store.ledger.head == head_sha:
+            # Nothing could be reviewed, and we already said so for this exact
+            # head. Repeating it on every webhook retry is noise; a real push
+            # moves the head and earns a fresh report. Nothing is recorded
+            # either way, so the files are retried the moment the backend
+            # recovers.
             logging.error(
-                "MR !%s: no file could be reviewed; staying silent so the next "
-                "push retries", mr_iid,
+                "MR !%s: still nothing reviewable at %s; already reported",
+                mr_iid, head_sha[:8] or "?",
             )
-            store.ledger = store.ledger.at_head(head_sha)
             _save_quietly(store, mr_iid)
         elif _charge(store, mr_iid, head=head_sha):
             gitlab_client.post_note(mr, render_summary(outcomes))

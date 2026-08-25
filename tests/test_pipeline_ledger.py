@@ -286,7 +286,7 @@ def test_unreadable_ledger_skips_the_run(harness, monkeypatch, caplog):
     assert "Critical error" not in caplog.text
 
 
-def test_a_rate_limited_run_records_nothing_and_says_nothing(harness, monkeypatch):
+def test_a_rate_limited_run_records_nothing_and_reports_once(harness, monkeypatch):
     """A backend outage must cost neither a comment nor a budget slot.
 
     The files stay out of the ledger so the next push retries them, and no
@@ -307,11 +307,14 @@ def test_a_rate_limited_run_records_nothing_and_says_nothing(harness, monkeypatc
         lambda mr: [fd(f"f{i}.py") for i in range(5)],
     )
     pipeline.review_merge_request(1, 1)
-
     assert recorder.inline == []
-    assert recorder.notes == []
-    assert state["ledger"].hunks == ()
-    assert state["ledger"].posted == 0, "a run that reviewed nothing costs nothing"
+    assert len(recorder.notes) == 1, "the human is told once that nothing worked"
+    assert state["ledger"].hunks == (), "nothing settled, so nothing is recorded"
+
+    # The same head must not be reported again on every webhook retry.
+    pipeline.review_merge_request(1, 1)
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.notes) == 1, "one report per head, not one per webhook"
     assert state["ledger"].muted is False, "an outage must not mute the MR"
 
 
@@ -449,3 +452,88 @@ def test_a_release_mr_cannot_outrun_the_comment_budget(harness, monkeypatch):
         f"30 pushes posted {len(recorder.notes)} notes against a budget of 3"
     )
     assert state["ledger"].posted == config.MR_COMMENT_BUDGET
+
+
+def test_a_comment_that_may_have_posted_keeps_its_slot(harness, monkeypatch):
+    """post_inline only catches GitlabError. A connection reset while reading
+    the response of a discussion GitLab already created used to escape, refund
+    the slot, and leave the comment public and unpaid — the ceiling silently
+    disengaging, which is the whole failure this branch exists to prevent."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+        ),
+    )
+
+    def _posts_then_dies(mr, path, line, body):
+        recorder.inline.append((path, body))
+        raise ConnectionError("connection reset after the discussion was created")
+
+    monkeypatch.setattr("reviewer.gitlab_client.post_inline", _posts_then_dies)
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(10)],
+    )
+    for _ in range(20):
+        pipeline.review_merge_request(1, 1)
+
+    assert len(recorder.inline) <= config.MR_COMMENT_BUDGET, (
+        f"{len(recorder.inline)} comments against a budget of "
+        f"{config.MR_COMMENT_BUDGET}"
+    )
+    # Charged, so the files count as settled and 19 further pushes cost nothing.
+    assert len(recorder.inline) == 10
+    assert state["ledger"].posted == 11, "ten comments plus the run summary"
+
+
+def test_two_broken_files_do_not_kill_review_of_the_healthy_ones(harness, monkeypatch):
+    """select_files sorts deterministically, so a breaker that counts per-file
+    errors puts the same two files first every run and silences the MR for
+    good. Errors are content-dependent; only rate limits are the backend."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+
+    def _chat(system, user, deadline_s):
+        if "poison" in user:
+            return pipeline.ChatResult("", "error", 0, 0, 0.0)
+        return pipeline.ChatResult("**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0)
+
+    monkeypatch.setattr("reviewer.pipeline.review_chat", _chat)
+    diffs = [fd("poison0.py"), fd("poison1.py")] + [fd(f"ok{i}.py") for i in range(8)]
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: diffs)
+
+    pipeline.review_merge_request(1, 1)
+
+    assert len(recorder.inline) == 8, "the healthy files must still be reviewed"
+    assert len(recorder.notes) == 1, "and the run still summarises itself"
+    for i in range(2):
+        assert hunk_key(f"poison{i}.py", diffs[i].hunks[0]) not in state["ledger"].hunks
+
+
+def test_a_file_that_fails_before_posting_gives_its_slot_back(harness, monkeypatch):
+    """Slots are charged before review_file runs, because a save that fails
+    after the comment is out disengages the ceiling. A file that never got as
+    far as posting must not keep the charge, or a flaky MR mutes itself."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+
+    def _dies_early(mr, file_diff, context, voice, review_state):
+        raise RuntimeError("blew up building the prompt")
+
+    monkeypatch.setattr("reviewer.pipeline.review_file", _dies_early)
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(5)],
+    )
+    pipeline.review_merge_request(1, 1)
+
+    assert recorder.inline == []
+    assert len(recorder.notes) == 1, "just the summary saying they all failed"
+    assert state["ledger"].posted == 1, (
+        "five refunded charges plus the summary note, not six"
+    )
