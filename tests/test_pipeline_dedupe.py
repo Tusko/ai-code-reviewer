@@ -1,8 +1,33 @@
+import pytest
+
 import reviewer.pipeline as pipeline
 from reviewer.diff_parser import FileDiff, Hunk
+from reviewer.ledger import Ledger
 from reviewer.ollama_client import ChatResult
 
 FD = FileDiff("a.py", "a.py", False, False, False, False, (Hunk(1, 1, (" x", "+y")),))
+
+
+class _FakeLedgerStore:
+    """Ledger stub for tests below: none of them exercise ledger behaviour, so
+    this always reports a fresh, unmuted, non-oversized ledger and no-ops on
+    save. Real ledger persistence is covered in test_pipeline_ledger.py."""
+
+    def __init__(self, mr):
+        self.mr = mr
+        self.ledger = Ledger()
+
+    @classmethod
+    def load(cls, mr):
+        return cls(mr)
+
+    def save(self):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _stub_ledger_store(monkeypatch):
+    monkeypatch.setattr(pipeline, "LedgerStore", _FakeLedgerStore)
 
 
 class FakeCommit:

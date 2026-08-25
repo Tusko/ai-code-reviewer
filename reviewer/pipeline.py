@@ -9,6 +9,7 @@ from reviewer import (
 from reviewer.chat_types import FINDING_TAGS, LGTM_TEXT, ChatResult
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.filters import is_reviewable
+from reviewer.ledger import LedgerStore, LedgerUnavailable, hunk_key
 from reviewer.memes import snark
 from reviewer.openrouter_client import review_chat
 from reviewer.queue import DedupeCache
@@ -215,6 +216,22 @@ def render_summary(outcomes: Sequence[FileOutcome]) -> str:
     return "\n".join(lines)
 
 
+def render_oversized(count: int) -> str:
+    """The single comment an over-threshold MR receives."""
+    lines = []
+    if config.SNARK:
+        lines.append(f"_{snark()}_\n")
+    lines.append(
+        f"**MR завеликий: {count} файлів до рев'ю, поріг — {config.MAX_MR_FILES}.**\n"
+    )
+    lines.append(
+        "Пофайлове рев'ю пропущено. На такому обсязі воно дає сотні коментарів "
+        "і нуль користі — розбий MR на менші або рев'юйте руками.\n"
+    )
+    lines.append("_Це єдиний коментар, який я лишу в цьому MR._")
+    return "\n".join(lines)
+
+
 def render_commit_digest(commits: Sequence[dict]) -> str:
     """Plain commit list, posted when Sidorovich has no model that can voice it."""
     lines = ["**Release/hotfix — full review skipped.** Commits:"]
@@ -314,18 +331,45 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
     try:
         project, mr = gitlab_client.fetch_mr(project_id, mr_iid)
 
+        try:
+            store = LedgerStore.load(mr)
+        except LedgerUnavailable as exc:
+            # An unreadable ledger must never be treated as an empty one: that
+            # re-reviews the whole MR, which is the flood this prevents.
+            logging.error("MR !%s: review state unreadable (%s); skipping", mr_iid, exc)
+            return
+
+        if store.ledger.muted and not force:
+            logging.info("MR !%s is muted; skipping", mr_iid)
+            return
+        if force:
+            store.ledger = store.ledger.unmute_and_reset()
+
         if should_skip_branch(getattr(mr, "source_branch", "")):
             summarize_release_mr(project_id, mr_iid, mr, force)
             return
 
         file_diffs = gitlab_client.fetch_file_diffs(mr)
+        head_sha = (getattr(mr, "diff_refs", None) or {}).get("head_sha", "")
+        reviewable, skipped = partition_reviewable(file_diffs)
+
+        if len(reviewable) > config.MAX_MR_FILES:
+            if not store.ledger.oversized:
+                gitlab_client.post_note(mr, render_oversized(len(reviewable)))
+                store.ledger = store.ledger.spend(1).mark_oversized()
+                logging.info(
+                    "MR !%s: %s reviewable files over MAX_MR_FILES=%s; posted one note",
+                    mr_iid, len(reviewable), config.MAX_MR_FILES,
+                )
+            store.ledger = store.ledger.at_head(head_sha)
+            store.save()
+            return
 
         fingerprint = gitlab_client.diff_fingerprint(project_id, mr_iid, file_diffs)
         if not force and dedupe.seen(fingerprint):
             logging.info("MR !%s diff unchanged since last review; skipping", mr_iid)
             return
 
-        reviewable, skipped = partition_reviewable(file_diffs)
         kept, outcomes = select_files(reviewable, skipped)
         voice = VoiceState()
 

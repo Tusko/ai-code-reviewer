@@ -3,6 +3,7 @@ import pytest
 from reviewer import pipeline
 from reviewer.chat_types import ChatResult
 from reviewer.diff_parser import FileDiff, Hunk
+from reviewer.ledger import Ledger
 from reviewer.pipeline import (
     FileOutcome, build_prompt_ladder, partition_reviewable, render_summary,
     review_file, review_merge_request, select_files,
@@ -12,11 +13,30 @@ from reviewer.voice import (
 )
 
 
+class _FakeLedgerStore:
+    """Ledger stub for tests below that call review_merge_request but don't
+    exercise ledger behaviour: always a fresh, unmuted, non-oversized ledger,
+    save is a no-op. Real ledger persistence is covered in
+    test_pipeline_ledger.py."""
+
+    def __init__(self, mr):
+        self.mr = mr
+        self.ledger = Ledger()
+
+    @classmethod
+    def load(cls, mr):
+        return cls(mr)
+
+    def save(self):
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _no_openrouter_voice(monkeypatch):
     # review_file flavors findings via OpenRouter when a key is set. Keep
     # existing tests hermetic unless they opt in.
     monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(pipeline, "LedgerStore", _FakeLedgerStore)
 
 
 def fd(path, added=1, **kwargs):
