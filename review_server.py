@@ -1,9 +1,10 @@
 import logging
+from dataclasses import dataclass
 
 from flask import Flask, jsonify, request
 
 from reviewer import config, gitlab_client
-from reviewer.pipeline import review_merge_request
+from reviewer.pipeline import mute_merge_request, review_merge_request
 from reviewer.queue import start_worker
 
 config.configure_logging()
@@ -26,53 +27,88 @@ elif config.SIDOROVICH_OLLAMA_FALLBACK:
 else:
     _sidorovich_llm = "disabled (no OPENROUTER_API_KEY)"
 logging.info("Sidorovich LLM: %s", _sidorovich_llm)
+logging.info(
+    "Guardrails: enabled=%s max_mr_files=%s comment_budget=%s ledger_max_hunks=%s",
+    config.SIDOROVICH_ENABLED, config.MAX_MR_FILES,
+    config.MR_COMMENT_BUDGET, config.LEDGER_MAX_HUNKS,
+)
 
 
-def _handle(job: tuple) -> None:
-    project_id, mr_iid, force = job
-    review_merge_request(project_id, mr_iid, force=force)
+@dataclass(frozen=True)
+class ReviewJob:
+    project_id: int
+    mr_iid: int
+    force: bool
+    command: str      # "review" | "mute"
+
+
+def queue_key(job: ReviewJob) -> str:
+    """Coalescing key. The command is part of it so a queued mute is never
+    replaced by a review for the same merge request."""
+    return f"{job.project_id}:{job.mr_iid}:{job.command}"
+
+
+def _handle(job: ReviewJob) -> None:
+    if job.command == "mute":
+        mute_merge_request(job.project_id, job.mr_iid)
+        return
+    review_merge_request(job.project_id, job.mr_iid, force=job.force)
 
 
 review_queue = start_worker(_handle)
 
 
-def should_review(event_type: str, data: dict) -> tuple[int, int, bool] | None:
-    """Returns (project_id, mr_iid, force) if this event warrants a review, else None.
+def should_review(event_type: str, data: dict) -> ReviewJob | None:
+    """Returns the job this event warrants, or None.
 
-    force is True for a manual '/review' comment, which must re-run even
-    though the diff itself is by definition unchanged. It is False for the
-    automatic Merge Request Hook paths, which defer to the dedupe cache.
+    force is True for a manual '/review' comment, which must re-run even though
+    the diff itself is by definition unchanged. It is False for the automatic
+    Merge Request Hook paths, which defer to the ledger.
+
+    The kill switch (config.SIDOROVICH_ENABLED) is checked first, before any
+    GitLab call: it must work even when GitLab itself is unreachable.
     """
+    if not config.SIDOROVICH_ENABLED:
+        return None
+
     attrs = data.get("object_attributes", {})
 
     if event_type == "Note Hook":
         if attrs.get("noteable_type") != "MergeRequest":
             return None
-        if "/review" not in (attrs.get("note") or "").lower():
+        note = (attrs.get("note") or "").lower()
+        if "/sidorovich stop" not in note and "/review" not in note:
             return None
+        project_id = data["project"]["id"]
+        mr_iid = data["merge_request"]["iid"]
         # The budget note ends with "кинь `/review`", and GitLab fires a Note
         # Hook for notes the bot creates through the API. Without this check
-        # the hard stop re-triggers itself: force=True runs unmute_and_reset,
-        # which clears `muted` and zeroes `posted`, and the cap re-arms
-        # forever. Fail closed when authorship cannot be established.
+        # a bot-authored note containing either command re-triggers itself:
+        # /review would clear its own mute via unmute_and_reset, and a
+        # /sidorovich stop the bot could issue to itself would be a kill
+        # switch an attacker (or a bug) could pull the bot's own strings on.
+        # Fail closed when authorship cannot be established.
         bot = gitlab_client.bot_username()
         if not bot:
-            logging.error("Ignoring /review: cannot tell whose comment this is")
+            logging.error("Ignoring note command: cannot tell whose comment this is")
             return None
         author = ((data.get("user") or {}).get("username") or "")
         if author.lower() == bot.lower():
-            logging.info("Ignoring /review: it is Sidorovich's own comment")
+            logging.info("Ignoring note command: it is Sidorovich's own comment")
             return None
-        return data["project"]["id"], data["merge_request"]["iid"], True
+        # Checked before /review so a comment containing both silences the bot.
+        if "/sidorovich stop" in note:
+            return ReviewJob(project_id, mr_iid, False, "mute")
+        return ReviewJob(project_id, mr_iid, True, "review")
 
     if event_type == "Merge Request Hook":
         action = attrs.get("action")
         if action in ("open", "reopen"):
-            return data["project"]["id"], attrs["iid"], False
+            return ReviewJob(data["project"]["id"], attrs["iid"], False, "review")
         # 'update' fires on title, description and label edits too. GitLab sets
         # oldrev only when new commits arrived, so it is our new-commits signal.
         if action == "update" and attrs.get("oldrev"):
-            return data["project"]["id"], attrs["iid"], False
+            return ReviewJob(data["project"]["id"], attrs["iid"], False, "review")
         return None
 
     return None
@@ -84,12 +120,11 @@ def webhook():
     if config.WEBHOOK_SECRET and token != config.WEBHOOK_SECRET:
         return jsonify({"error": "Invalid token"}), 403
 
-    target = should_review(request.headers.get("X-Gitlab-Event"), request.json or {})
-    if not target:
+    job = should_review(request.headers.get("X-Gitlab-Event"), request.json or {})
+    if not job:
         return jsonify({"message": "Ignored event"}), 200
 
-    project_id, mr_iid, force = target
-    if review_queue.submit(f"{project_id}:{mr_iid}", (project_id, mr_iid, force)):
+    if review_queue.submit(queue_key(job), job):
         return jsonify({"message": "Review queued", "depth": review_queue.size()}), 202
     return jsonify({"error": "Review queue full"}), 503
 

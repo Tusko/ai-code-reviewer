@@ -357,6 +357,21 @@ def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
     logging.info("MR !%s release/hotfix summarised (%s commits)", mr_iid, len(commits))
 
 
+def mute_merge_request(project_id: int, mr_iid: int) -> None:
+    """Silences the bot for one MR. Acknowledged by editing the state note.
+
+    Deliberately posts no comment: a mute that costs a comment defeats itself.
+    """
+    try:
+        _, mr = gitlab_client.fetch_mr(project_id, mr_iid)
+        store = LedgerStore.load(mr)
+        store.ledger = store.ledger.mute()
+        store.save()
+        logging.info("MR !%s muted by /sidorovich stop", mr_iid)
+    except Exception as exc:
+        logging.error("Could not mute MR !%s: %s", mr_iid, exc)
+
+
 def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> None:
     started = time.monotonic()
     try:

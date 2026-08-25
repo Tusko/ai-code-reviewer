@@ -38,10 +38,10 @@ class ReviewQueue:
 
     def __init__(self, maxsize: int = None):
         self._maxsize = maxsize or config.QUEUE_MAXSIZE
-        self._items: OrderedDict[str, tuple] = OrderedDict()
+        self._items: OrderedDict[str, object] = OrderedDict()
         self._cv = threading.Condition()
 
-    def submit(self, key: str, job: tuple) -> bool:
+    def submit(self, key: str, job: object) -> bool:
         with self._cv:
             if key in self._items:
                 # Keep queue position, replace payload with the newer one.
@@ -55,7 +55,7 @@ class ReviewQueue:
             self._cv.notify()
             return True
 
-    def take(self) -> tuple:
+    def take(self) -> object:
         with self._cv:
             while not self._items:
                 self._cv.wait()
@@ -67,7 +67,7 @@ class ReviewQueue:
             return len(self._items)
 
 
-def start_worker(handler: Callable[[tuple], None]) -> ReviewQueue:
+def start_worker(handler: Callable[[object], None]) -> ReviewQueue:
     """Starts one daemon consumer. Only ever one, to keep Ollama serialized."""
     queue = ReviewQueue()
 
