@@ -1,6 +1,6 @@
-# AI Code Reviewer with Ollama & Cloudflare Tunnel
+# AI Code Reviewer with Cloudflare Tunnel
 
-This project sets up a local AI Code Review bot that integrates with GitLab Merge Requests using Docker, Ollama, and Cloudflare Tunnel.
+This project sets up an AI Code Review bot that integrates with GitLab Merge Requests using Docker, OpenRouter, and Cloudflare Tunnel. Code review itself runs on OpenRouter (see [Review model](#review-model)) — a local Ollama model is optional and, by default, used only as a fallback for the Sidorovich voice.
 
 ## Prerequisites
 
@@ -18,6 +18,9 @@ This project sets up a local AI Code Review bot that integrates with GitLab Merg
 3.  **Configure `.env`:**
     *   `GITLAB_TOKEN`: Create a [Personal Access Token](https://gitlab.com/-/profile/personal_access_tokens) with `api` scope.
     *   `WEBHOOK_SECRET`: Generate a random string (e.g., `openssl rand -hex 12`).
+    *   `OPENROUTER_API_KEY`: **Required.** Code review runs on OpenRouter, not
+        Ollama — without a key every file review comes back as an error. Get
+        one at https://openrouter.ai/keys.
     *   `TUNNEL_TOKEN`: See step 4.
 
 4.  **Set up Cloudflare Tunnel:**
@@ -34,9 +37,12 @@ This project sets up a local AI Code Review bot that integrates with GitLab Merg
     docker compose up -d
     ```
 
-6.  **Pull the AI Model:**
-    Ollama runs on the **host**, not in Docker (see "Tuning for Mac Mini M4
-    16 GB" below), so pull it there directly:
+6.  **(Optional) Pull a local Ollama model:**
+    Code review itself needs no local model — it runs on OpenRouter. This
+    step is only needed if you set `SIDOROVICH_OLLAMA_FALLBACK=true`, which
+    lets a local model attempt the release/hotfix roast when OpenRouter is
+    unavailable. Ollama runs on the **host**, not in Docker (see "Tuning for
+    Mac Mini M4 16 GB" below), so pull it there directly:
     ```bash
     ollama pull qwen2.5-coder:7b
     ```
@@ -48,15 +54,96 @@ This project sets up a local AI Code Review bot that integrates with GitLab Merg
     *   Go to your GitLab Project > **Settings > Webhooks**.
     *   **URL:** `https://code-review.yourdomain.com/webhook` (The public hostname you set in Cloudflare).
     *   **Secret Token:** The same `WEBHOOK_SECRET` from your `.env`.
-    *   **Triggers:** check **Merge request events** *and* **Note events** (so the bot can also respond to review comments).
+    *   **Triggers:** check **Merge request events** *and* **Note events**. Note
+        events are required for `/review` and `/sidorovich stop` — without
+        them neither comment command does anything.
     *   Click **Add webhook**.
 
 ## Usage
 
 - **Automatic reviews:** Create or update a Merge Request in your GitLab project. The AI reviewer will automatically comment on the MR with feedback.
-- **Manual trigger via comment:** Post a comment containing `/review` (case-insensitive) on any MR. The bot will fetch the current diff and post its AI review again.
+- **Manual trigger via comment:** Post a comment containing `/review`
+  (case-insensitive) on any MR. The bot will re-review now, clearing any mute
+  and resetting the comment counter to zero.
+- **Silence a noisy MR:** Post `/sidorovich stop` to mute the bot for that MR
+  only; `/review` lifts it. See [Comment guardrails](#comment-guardrails) for
+  the full behaviour, including why a command has to be typed as its own word
+  — `/review` inside a path like `app/review/service.py`, inside backticks,
+  or in a quoted reply does not trigger it.
 
-You can change or extend the keyword by editing `review_server.py` if desired.
+You can change or extend the command patterns by editing `REVIEW_RE` and
+`STOP_RE` in `review_server.py` if desired.
+
+## Comment guardrails
+
+The bot keeps a per-MR ledger of the diff hunks it has already reviewed,
+stored in a single 🔒 state note it creates once and edits in place.
+**Do not edit or delete that note by hand** — deleting it makes the bot
+forget the MR and review it from scratch.
+
+| Situation | What the bot does |
+|---|---|
+| More than `MAX_MR_FILES` (60) reviewable files | Posts exactly one note asking for a smaller MR, the first time this happens. Per-file review is skipped on that push and on every later push while the file count stays above the threshold, with no further note. If a later push drops the file count to `MAX_MR_FILES` or below, review resumes normally. |
+| A push whose hunks were all reviewed already | Posts nothing at all. |
+| A push with new hunks | Reviews only the new hunks. |
+| `MR_COMMENT_BUDGET` (30) comments reached | Posts one closing note and goes quiet until `/review`. |
+| A rebase or force-push | Unchanged hunk content is not re-reviewed. Hunk keys hash content, not line numbers. |
+
+### Commands
+
+- `/review` in an MR comment — re-review now, clear any mute, reset the
+  comment counter to zero. It does **not** override the `MAX_MR_FILES`
+  threshold.
+- `/sidorovich stop` in an MR comment — silence the bot for that MR only. It
+  acknowledges by editing the state note, not by posting a comment. `/review`
+  lifts it.
+
+A command has to be typed, not merely mentioned: `/review` inside a path like
+`app/review/service.py`, inside backticks, or in a quoted reply does not
+trigger it, and `/sidorovich stopwatch` is not the kill switch. Both commands
+arrive as GitLab Note Hook webhooks, so **Note events** must be enabled on the
+webhook (see the Setup step above) or neither command does anything.
+
+The bot also ignores any comment it judges to be its own, so that it can't
+clear its own mute or reset its own budget — its closing note literally tells
+the human to type `/review`, and GitLab fires a Note Hook for the bot's own
+comments too. That check needs to know which GitLab account `GITLAB_TOKEN`
+authenticates as. Normally the bot asks GitLab directly the first time it
+matters; if the token cannot look up its own user (for example a
+project-scoped access token without permission to read its own identity),
+the bot **fails closed and silently ignores every `/review` and
+`/sidorovich stop` comment**, with nothing posted to explain why. If comment
+commands stop working for no apparent reason, check the container logs for
+`cannot tell whose comment this is`, and set `SIDOROVICH_BOT_USERNAME` in
+`.env` to the bot's exact GitLab username to fix it.
+
+### Global off switch
+
+`SIDOROVICH_ENABLED=false` makes every webhook a no-op. Use it instead of
+disabling the GitLab webhook, which silences the bot for every project on the
+instance.
+
+## Review model
+
+Code review runs on OpenRouter (`OPENROUTER_REVIEW_MODEL`, default
+`poolside/laguna-s-2.1`) — a separate model and a separate OpenRouter call
+from the one behind the Sidorovich voice (`OPENROUTER_MODEL`). Findings are
+generated by `OPENROUTER_REVIEW_MODEL`; when `SNARK=true`, each finding is
+then rewritten in Sidorovich's voice by a second call to `OPENROUTER_MODEL`.
+**`OPENROUTER_API_KEY` is now required for review to produce any output at
+all**, not only for the Sidorovich voice — without it, every file comes back
+as an error.
+
+`OPENROUTER_REVIEW_FALLBACK_MODELS` is a comma-separated list of models tried
+after `OPENROUTER_REVIEW_MODEL`, in the same OpenRouter request.
+`REVIEW_CONTEXT_TOKENS` and `REVIEW_MAX_OUTPUT_TOKENS` bound the review
+prompt and response the same way `OLLAMA_NUM_CTX` / `OLLAMA_NUM_PREDICT`
+used to for the old Ollama-based review path.
+
+Ollama is no longer used for code review at all. It remains available only
+as an opt-in fallback for the Sidorovich release/hotfix roast, behind
+`SIDOROVICH_OLLAMA_FALLBACK` (off by default); `OLLAMA_NUM_CTX` and
+`OLLAMA_NUM_PREDICT` govern only that path now, not review.
 
 ## Upgrading from an earlier version
 
@@ -77,9 +164,15 @@ upgrade, see none of the intended speedup, and nothing tells you why. If your
 
 ## Tuning for Mac Mini M4 16 GB
 
+> Code review runs on OpenRouter now, not Ollama — see [Review model](#review-model).
+> Everything in this section applies only if you enable
+> `SIDOROVICH_OLLAMA_FALLBACK=true`, and even then Ollama only ever sees a
+> short commit-list roast prompt, never a full MR diff. If you are not using
+> that fallback, none of this tuning is required to run the bot.
+
 The Flask app talks to **Ollama running on the host** (not in Docker). On 16 GB
-unified memory, **context size is the main cause of hung reviews** — a 12B model
-at 32K context plus a large MR diff will swap-thrash and appear stuck.
+unified memory, **context size is the main cause of a hung roast** — a 12B model
+at 32K context will swap-thrash and appear stuck.
 
 ### Recommended model + context
 
@@ -108,7 +201,7 @@ INCLUDE_FILE_CONTEXT=false
 CONTEXT_WINDOW=15
 
 # Tone. true: a meme on the summary note, and Sidorovich voice on inline
-# findings (OpenRouter rewrite of the dry Ollama review). false: dry
+# findings (a second OpenRouter call rewrites the dry review). false: dry
 # comments end to end. Voice never invents or drops issues; a failed
 # rewrite posts the original review.
 SNARK=true
@@ -123,7 +216,7 @@ QUEUE_MAXSIZE=32
 ### How reviews are scheduled
 
 Webhooks return immediately after enqueuing. One background worker drains the
-queue, so only one Ollama request is ever in flight. Repeat webhooks for the
+queue, so only one review job is ever in flight. Repeat webhooks for the
 same MR coalesce into the single queued job, and an MR whose diff has not
 changed since its last review is skipped entirely.
 
@@ -135,14 +228,15 @@ Reviews run one file at a time. Each file gets its own request with a
 Files that cannot fit the context budget are named in the summary note rather
 than dropped silently.
 
-Finding detection always stays on Ollama. With `SNARK=true` and
-`OPENROUTER_API_KEY` set, each inline comment is rewritten as Sidorovich
-(surzhyk, swearing) afterwards — same headings, same `*Fix:*` blocks, only
-the prose changes. If that rewrite fails, rate-limits, or mutates a finding,
-the dry review is posted instead. After `VOICE_FAILURE_LIMIT` consecutive
-voice failures (free-tier rate limits, mostly) the rest of that MR stays dry,
-so one merge request never mixes voiced and dry comments. `SNARK=false` keeps
-comments professional.
+Finding detection runs on OpenRouter (`OPENROUTER_REVIEW_MODEL`), not Ollama —
+see [Review model](#review-model). With `SNARK=true` and `OPENROUTER_API_KEY`
+set, each inline finding is then rewritten as Sidorovich (surzhyk, swearing)
+by a second, separate OpenRouter call (`OPENROUTER_MODEL`) afterwards — same
+headings, same `*Fix:*` blocks, only the prose changes. If that rewrite
+fails, rate-limits, or mutates a finding, the dry review is posted instead.
+After `VOICE_FAILURE_LIMIT` consecutive voice failures (free-tier rate
+limits, mostly) the rest of that MR stays dry, so one merge request never
+mixes voiced and dry comments. `SNARK=false` keeps comments professional.
 
 Two situations skip a **full** file-by-file review:
 
@@ -235,18 +329,38 @@ At 32K context the same model needs ~3 GB of KV cache alone and will hang on 16 
 ## Troubleshooting
 
 *   **Logs:** Check logs with `docker compose logs -f`.
-*   **Ollama:** Ensure the model is pulled (`ollama list`).
+*   **Ollama:** Only relevant if `SIDOROVICH_OLLAMA_FALLBACK=true`. Ensure the
+    model is pulled (`ollama list`).
 *   **Tunnel:** Check Cloudflare dashboard to see if the tunnel is "Healthy".
 *   **Review stuck / never finishes:** check `curl localhost:5000/health` for
-    `queue_depth`. A depth above zero with no log progress means Ollama is
-    wedged — run `ollama ps` and confirm `PROCESSOR=100% GPU`. Individual files
-    now abort after `PER_FILE_TIMEOUT_S` instead of hanging.
-*   **Read timed out:** Ollama is partially CPU-offloaded. Check `ollama ps`.
-*   **Slow first review:** Model cold-load from disk on a 16 GB box can take
-    30–90 s. The `keep_alive: 24h` setting prevents this on subsequent MRs.
-*   **`404 Not Found for url: .../api/chat`:** Ollama is up but the
-    `model` field in the request points at a model that is not currently
-    pulled. Two common causes:
+    `queue_depth`. A depth above zero with no log progress most likely means
+    `OPENROUTER_API_KEY` is missing or invalid, or OpenRouter itself is rate
+    limiting the request — check the logs for `OpenRouter returned` /
+    `Error communicating with OpenRouter`. With `SIDOROVICH_OLLAMA_FALLBACK=true`
+    it can also mean Ollama is wedged — run `ollama ps` and confirm
+    `PROCESSOR=100% GPU`. Individual files now abort after `PER_FILE_TIMEOUT_S`
+    instead of hanging.
+*   **Read timed out (Ollama fallback path only):** Ollama is partially
+    CPU-offloaded. Check `ollama ps`.
+*   **`/review` or `/sidorovich stop` does nothing:** Confirm **Note events**
+    is enabled on the GitLab webhook (Setup step 7) — without it neither
+    command reaches the bot at all. Also check the logs for
+    `cannot tell whose comment this is`: if `GITLAB_TOKEN` cannot look up its
+    own GitLab user, both commands fail closed and are silently ignored; set
+    `SIDOROVICH_BOT_USERNAME` to fix it. See
+    [Comment guardrails](#comment-guardrails).
+*   **The bot suddenly stopped commenting on one MR:** Check the 🔒 state note
+    on the MR — it says whether the MR is muted (`/sidorovich stop`, or the
+    `MR_COMMENT_BUDGET` was reached) or marked oversized
+    (`MAX_MR_FILES` exceeded). Post `/review` to clear a mute and reset the
+    comment counter; an oversized MR needs fewer files instead. Also check
+    `SIDOROVICH_ENABLED`, which silences every MR at once.
+*   **Slow first roast (Ollama fallback path only):** Model cold-load from
+    disk on a 16 GB box can take 30–90 s. The `keep_alive: 24h` setting
+    prevents this on subsequent MRs.
+*   **`404 Not Found for url: .../api/chat` (Ollama fallback path only):**
+    Ollama is up but the `model` field in the request points at a model that
+    is not currently pulled. Two common causes:
     1.  You changed `OLLAMA_MODEL` in `.env` but used `docker compose restart`,
         which does **not** re-read `.env`. Always use
         `docker compose up -d --force-recreate app` after editing `.env`.
