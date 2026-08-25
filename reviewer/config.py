@@ -66,6 +66,22 @@ OPENROUTER_VOICE_MAX_TOKENS = env_int("OPENROUTER_VOICE_MAX_TOKENS", 2048)
 # release/hotfix MRs get a plain commit digest instead.
 SIDOROVICH_OLLAMA_FALLBACK = env_bool("SIDOROVICH_OLLAMA_FALLBACK", False)
 
+# Review backend. Ollama no longer serves the review path; it remains only as
+# the optional Sidorovich voice fallback above.
+OPENROUTER_REVIEW_MODEL = os.environ.get(
+    "OPENROUTER_REVIEW_MODEL", "poolside/laguna-s-2.1",
+)
+# Extra models tried in order after OPENROUTER_REVIEW_MODEL within one request.
+# Empty by default: a paid model already reroutes across providers on its own.
+OPENROUTER_REVIEW_FALLBACK_MODELS = env_list("OPENROUTER_REVIEW_FALLBACK_MODELS", [])
+# Deliberately below the model's 1_048_576 window. Prompt tokens are billed and
+# estimate_tokens is a pessimistic len//3; one file whose diff exceeds this is
+# not something a single review call should attempt. Raise it to use the rest.
+REVIEW_CONTEXT_TOKENS = env_int("REVIEW_CONTEXT_TOKENS", 262144)
+# Deliberately below the model's 131_072 ceiling. A single-file review needing
+# more than this is producing a wall of comments, which is what we prevent.
+REVIEW_MAX_OUTPUT_TOKENS = env_int("REVIEW_MAX_OUTPUT_TOKENS", 4096)
+
 # Tone. Off keeps summaries and inline comments dry. On adds a meme to the
 # summary and, when OpenRouter is keyed, rewrites inline findings as
 # Sidorovich. The bugs themselves still come from the local coder model.

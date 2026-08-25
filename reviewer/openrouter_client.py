@@ -24,8 +24,10 @@ def chat(
     temperature: float = 1.0,
     max_tokens: int | None = None,
     history: Sequence[dict] = (),
+    model: str | None = None,
+    fallback_models: Sequence[str] | None = None,
 ) -> ChatResult:
-    """One-shot OpenRouter chat completion for Sidorovich voice.
+    """One-shot OpenRouter chat completion.
 
     `history` is inserted between the system prompt and `user`, so a retry can
     show the model the reply it is being asked to correct.
@@ -43,8 +45,15 @@ def chat(
             elapsed_s=0.0,
         )
 
+    chosen = model or config.OPENROUTER_MODEL
+    fallbacks = (
+        list(fallback_models)
+        if fallback_models is not None
+        else list(config.OPENROUTER_FALLBACK_MODELS)
+    )
+
     body = {
-        "model": config.OPENROUTER_MODEL,
+        "model": chosen,
         "messages": [
             {"role": "system", "content": system},
             *history,
@@ -54,10 +63,10 @@ def chat(
         "top_p": 0.95,
         "max_tokens": max_tokens or config.OPENROUTER_MAX_TOKENS,
     }
-    if config.OPENROUTER_FALLBACK_MODELS:
+    if fallbacks:
         # OpenRouter walks this list itself when a provider 429s or errors, so
-        # one request already survives a saturated `:free` pool.
-        body["models"] = [config.OPENROUTER_MODEL, *config.OPENROUTER_FALLBACK_MODELS]
+        # one request already survives a saturated pool.
+        body["models"] = [chosen, *fallbacks]
     headers = {
         "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -86,6 +95,25 @@ def chat(
         time.sleep(backoff)
 
     return result
+
+
+def review_chat(system: str, user: str, deadline_s: int) -> ChatResult:
+    """Code review completion. Low temperature: a review must not improvise.
+
+    The Ollama path this replaces pinned seed=42 for reproducibility. OpenRouter
+    exposes no seed, so identical diffs may now yield slightly different
+    findings. The ledger dedupes on diff content, not on review text, so this
+    does not cause repeat comments.
+    """
+    return chat(
+        system,
+        user,
+        deadline_s,
+        temperature=0.1,
+        max_tokens=config.REVIEW_MAX_OUTPUT_TOKENS,
+        model=config.OPENROUTER_REVIEW_MODEL,
+        fallback_models=config.OPENROUTER_REVIEW_FALLBACK_MODELS,
+    )
 
 
 def _attempt(
