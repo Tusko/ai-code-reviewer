@@ -4,8 +4,8 @@ from reviewer import pipeline
 from reviewer.chat_types import ChatResult
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.pipeline import (
-    FileOutcome, build_prompt_ladder, render_summary, review_file,
-    review_merge_request, select_files,
+    FileOutcome, build_prompt_ladder, partition_reviewable, render_summary,
+    review_file, review_merge_request, select_files,
 )
 from reviewer.voice import (
     VOICE_FAILURE_LIMIT, flavor_review, prefer_ukrainian, preserves_findings,
@@ -50,19 +50,12 @@ def test_select_files_orders_smallest_first():
 
 
 def test_select_files_reports_filtered_files():
-    kept, outcomes = select_files([fd("src/a.py"), fd("package-lock.json")])
+    reviewable, skipped = partition_reviewable([fd("src/a.py"), fd("package-lock.json")])
+    kept, outcomes = select_files(reviewable, skipped)
     assert [f.new_path for f in kept] == ["src/a.py"]
     assert outcomes[0].path == "package-lock.json"
     assert outcomes[0].status == "skipped"
     assert outcomes[0].detail == "lockfile"
-
-
-def test_select_files_caps_at_max_files(monkeypatch):
-    monkeypatch.setattr("reviewer.config.MAX_FILES", 2)
-    kept, outcomes = select_files([fd(f"f{i}.py", added=i + 1) for i in range(5)])
-    assert len(kept) == 2
-    over = [o for o in outcomes if o.detail == "over MAX_FILES limit"]
-    assert len(over) == 3
 
 
 def test_ladder_starts_at_l1_when_context_disabled(monkeypatch):
@@ -542,3 +535,33 @@ def test_review_file_skips_bare_lgtm_without_punctuation(monkeypatch):
     )
     outcome = review_file(FakeMR(), fd("a.py"), context="")
     assert outcome.status == "clean"
+
+
+def test_partition_reviewable_splits_and_names_reasons():
+    good = fd("app.py")
+    lock = fd("poetry.lock")
+    keep, skipped = partition_reviewable([good, lock])
+    assert [f.new_path for f in keep] == ["app.py"]
+    assert [(o.path, o.detail) for o in skipped] == [("poetry.lock", "lockfile")]
+
+
+def test_select_files_carries_skip_outcomes_through():
+    keep, skipped = partition_reviewable([fd("app.py"), fd("yarn.lock")])
+    kept, outcomes = select_files(keep, skipped)
+    assert [f.new_path for f in kept] == ["app.py"]
+    assert any(o.detail == "lockfile" for o in outcomes)
+
+
+def test_select_files_caps_at_max_files(monkeypatch):
+    monkeypatch.setattr("reviewer.config.MAX_FILES", 2)
+    files = [fd(f"f{i}.py", added=i + 1) for i in range(5)]
+    kept, outcomes = select_files(files, [])
+    assert len(kept) == 2
+    assert sum(1 for o in outcomes if o.detail == "over MAX_FILES limit") == 3
+
+
+def test_select_files_keeps_smallest_first(monkeypatch):
+    monkeypatch.setattr("reviewer.config.MAX_FILES", 2)
+    files = [fd("big.py", added=9), fd("small.py", added=1), fd("mid.py", added=4)]
+    kept, _ = select_files(files, [])
+    assert [f.new_path for f in kept] == ["small.py", "mid.py"]

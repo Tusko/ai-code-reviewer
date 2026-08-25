@@ -59,23 +59,31 @@ def should_skip_branch(branch: str) -> bool:
     return any(branch.startswith(prefix) for prefix in SKIP_BRANCH_PREFIXES)
 
 
-def select_files(file_diffs: Sequence[FileDiff]) -> tuple[list[FileDiff], list[FileOutcome]]:
+def partition_reviewable(
+    file_diffs: Sequence[FileDiff],
+) -> tuple[list[FileDiff], list[FileOutcome]]:
+    """Splits diffs into reviewable files and named skip outcomes."""
     kept: list[FileDiff] = []
     outcomes: list[FileOutcome] = []
-
     for fd in file_diffs:
         ok, reason = is_reviewable(fd)
         if ok:
             kept.append(fd)
         else:
             outcomes.append(FileOutcome(fd.new_path, "skipped", reason))
+    return kept, outcomes
 
-    kept.sort(key=lambda f: f.total_lines)
+
+def select_files(
+    reviewable: Sequence[FileDiff], skipped: Sequence[FileOutcome] = (),
+) -> tuple[list[FileDiff], list[FileOutcome]]:
+    """Applies the per-run MAX_FILES cap, smallest files first."""
+    outcomes = list(skipped)
+    kept = sorted(reviewable, key=lambda f: f.total_lines)
     if len(kept) > config.MAX_FILES:
         for fd in kept[config.MAX_FILES:]:
             outcomes.append(FileOutcome(fd.new_path, "skipped", "over MAX_FILES limit"))
         kept = kept[: config.MAX_FILES]
-
     return kept, outcomes
 
 
@@ -317,7 +325,8 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             logging.info("MR !%s diff unchanged since last review; skipping", mr_iid)
             return
 
-        kept, outcomes = select_files(file_diffs)
+        reviewable, skipped = partition_reviewable(file_diffs)
+        kept, outcomes = select_files(reviewable, skipped)
         voice = VoiceState()
 
         if not kept:
