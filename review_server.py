@@ -1,5 +1,6 @@
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 
 from flask import Flask, jsonify, request
 
@@ -32,6 +33,16 @@ logging.info(
     config.SIDOROVICH_ENABLED, config.MAX_MR_FILES,
     config.MR_COMMENT_BUDGET, config.LEDGER_MAX_HUNKS,
 )
+
+
+# A command has to be typed, not merely mentioned. Rejecting a preceding word
+# character or slash keeps a path like app/review/service.py from resetting the
+# budget; rejecting a preceding backtick keeps a documentation mention from
+# doing it -- including Sidorovich's own budget note, quote-replied by a human,
+# which the author filter cannot catch because a human really did write it.
+REVIEW_RE = re.compile(r"(?<![\w/`])/review\b", re.IGNORECASE)
+# Trailing \b so "/sidorovich stopwatch" is not a kill switch.
+STOP_RE = re.compile(r"(?<![\w/`])/sidorovich\s+stop\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -69,6 +80,9 @@ def should_review(event_type: str, data: dict) -> ReviewJob | None:
     GitLab call: it must work even when GitLab itself is unreachable.
     """
     if not config.SIDOROVICH_ENABLED:
+        # Logged, not silent: "the bot stopped commenting" must be answerable
+        # from the container log without anyone guessing at the config.
+        logging.info("SIDOROVICH_ENABLED is false; ignoring %s", event_type)
         return None
 
     attrs = data.get("object_attributes", {})
@@ -76,11 +90,9 @@ def should_review(event_type: str, data: dict) -> ReviewJob | None:
     if event_type == "Note Hook":
         if attrs.get("noteable_type") != "MergeRequest":
             return None
-        note = (attrs.get("note") or "").lower()
-        if "/sidorovich stop" not in note and "/review" not in note:
+        note = (attrs.get("note") or "")
+        if not (STOP_RE.search(note) or REVIEW_RE.search(note)):
             return None
-        project_id = data["project"]["id"]
-        mr_iid = data["merge_request"]["iid"]
         # The budget note ends with "кинь `/review`", and GitLab fires a Note
         # Hook for notes the bot creates through the API. Without this check
         # a bot-authored note containing either command re-triggers itself:
@@ -96,8 +108,12 @@ def should_review(event_type: str, data: dict) -> ReviewJob | None:
         if author.lower() == bot.lower():
             logging.info("Ignoring note command: it is Sidorovich's own comment")
             return None
+        # Read after the author check: a malformed hook we were going to
+        # ignore anyway must not raise KeyError and fail the whole webhook.
+        project_id = data["project"]["id"]
+        mr_iid = data["merge_request"]["iid"]
         # Checked before /review so a comment containing both silences the bot.
-        if "/sidorovich stop" in note:
+        if STOP_RE.search(note):
             return ReviewJob(project_id, mr_iid, False, "mute")
         return ReviewJob(project_id, mr_iid, True, "review")
 
@@ -123,6 +139,18 @@ def webhook():
     job = should_review(request.headers.get("X-Gitlab-Event"), request.json or {})
     if not job:
         return jsonify({"message": "Ignored event"}), 200
+
+    if job.command == "mute":
+        if review_queue.drop(f"{job.project_id}:{job.mr_iid}:review"):
+            logging.info("Dropped the queued review for MR !%s in favour of the "
+                         "mute", job.mr_iid)
+    else:
+        queued = review_queue.peek(queue_key(job))
+        if getattr(queued, "force", False) and not job.force:
+            # Coalescing keeps the newer payload, so a push landing behind a
+            # human's /review would otherwise silently downgrade it and the
+            # ledger would then suppress everything.
+            job = replace(job, force=True)
 
     if review_queue.submit(queue_key(job), job):
         return jsonify({"message": "Review queued", "depth": review_queue.size()}), 202

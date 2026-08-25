@@ -1,5 +1,8 @@
 import pytest
 
+import reviewer.pipeline as pipeline
+from reviewer.ledger import Ledger
+
 import review_server
 from review_server import ReviewJob, app, queue_key, should_review
 from reviewer import gitlab_client
@@ -165,3 +168,116 @@ def test_webhook_returns_503_when_queue_full(client, monkeypatch):
 
 def test_health_endpoint(client):
     assert client.get("/health").status_code == 200
+
+
+def test_a_path_containing_review_is_not_a_command():
+    """app/review/service.py must not reset the budget and lift the mute."""
+    note = "I fixed the bug in app/review/service.py, please take a look"
+    assert should_review("Note Hook", _note_hook(note)) is None
+
+
+def test_a_human_quoting_the_budget_note_does_not_lift_the_mute():
+    """The author filter cannot help here: a human really did write this."""
+    note = "> Далі мовчу. Кинь `/review` — лічильник обнулиться.\n\nОй."
+    assert should_review("Note Hook", _note_hook(note)) is None
+
+
+def test_stopwatch_is_not_a_kill_switch():
+    assert should_review("Note Hook", _note_hook("/sidorovich stopwatch")) is None
+
+
+def test_a_typed_review_command_still_works():
+    for note in ("/review", "  /review please", "please /review this"):
+        job = should_review("Note Hook", _note_hook(note))
+        assert job == ReviewJob(3, 7, True, "review"), note
+
+
+def test_kill_switch_needs_no_network(monkeypatch):
+    """The off switch must work when GitLab is exactly what is broken."""
+    def _no(*a, **kw):
+        raise AssertionError("a killed bot must not touch the network")
+
+    monkeypatch.setattr("reviewer.config.SIDOROVICH_ENABLED", False)
+    monkeypatch.setattr(gitlab_client, "bot_username", _no)
+    monkeypatch.setattr(gitlab_client, "fetch_mr", _no)
+    assert should_review("Note Hook", _note_hook("/review")) is None
+    assert should_review("Merge Request Hook", _mr_hook("open")) is None
+
+
+def test_a_bot_authored_command_on_a_malformed_hook_does_not_raise():
+    data = _note_hook("/review", author="sidorovich-bot")
+    del data["merge_request"]
+    assert should_review("Note Hook", data) is None
+
+
+def test_a_mute_drops_the_review_it_was_typed_to_stop(monkeypatch):
+    """Queued behind the flood it is meant to stop, a mute is worthless."""
+    from reviewer.queue import ReviewQueue
+
+    queue = ReviewQueue(maxsize=8)
+    monkeypatch.setattr(review_server, "review_queue", queue)
+    review = ReviewJob(3, 7, False, "review")
+    queue.submit(review_server.queue_key(review), review)
+
+    client = app.test_client()
+    client.post("/webhook", json=_note_hook("/sidorovich stop"),
+                headers={"X-Gitlab-Event": "Note Hook"})
+
+    assert queue.size() == 1
+    assert queue.take() == ReviewJob(3, 7, False, "mute")
+
+
+def test_a_push_does_not_downgrade_a_queued_manual_review(monkeypatch):
+    """Coalescing keeps the newer payload, so force must be made sticky."""
+    from reviewer.queue import ReviewQueue
+
+    queue = ReviewQueue(maxsize=8)
+    monkeypatch.setattr(review_server, "review_queue", queue)
+    manual = ReviewJob(3, 7, True, "review")
+    queue.submit(review_server.queue_key(manual), manual)
+
+    client = app.test_client()
+    client.post("/webhook", json=_mr_hook("update", oldrev="abc123"),
+                headers={"X-Gitlab-Event": "Merge Request Hook"})
+
+    assert queue.take().force is True, "the human's /review must survive a push"
+
+
+def test_a_mute_job_actually_mutes(monkeypatch):
+    """The dispatch and the mute itself, not just the parsing of the command."""
+    state = {"ledger": Ledger(), "saved": 0}
+
+    class FakeStore:
+        def __init__(self):
+            pass
+
+        @property
+        def ledger(self):
+            return state["ledger"]
+
+        @ledger.setter
+        def ledger(self, value):
+            state["ledger"] = value
+
+        @classmethod
+        def load(cls, mr):
+            return cls()
+
+        def save(self):
+            state["saved"] += 1
+
+    monkeypatch.setattr(pipeline, "LedgerStore", FakeStore)
+    monkeypatch.setattr(pipeline.gitlab_client, "fetch_mr",
+                        lambda pid, iid: (object(), object()))
+
+    review_server._handle(ReviewJob(3, 7, False, "mute"))
+
+    assert state["ledger"].muted is True
+    assert state["saved"] == 1
+
+
+def test_a_mute_job_does_not_run_a_review(monkeypatch):
+    monkeypatch.setattr(review_server, "review_merge_request",
+                        lambda *a, **kw: pytest.fail("a mute must not review"))
+    monkeypatch.setattr(review_server, "mute_merge_request", lambda pid, iid: None)
+    review_server._handle(ReviewJob(3, 7, False, "mute"))

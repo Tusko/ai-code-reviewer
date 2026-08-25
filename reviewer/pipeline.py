@@ -360,7 +360,9 @@ def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
 def mute_merge_request(project_id: int, mr_iid: int) -> None:
     """Silences the bot for one MR. Acknowledged by editing the state note.
 
-    Deliberately posts no comment: a mute that costs a comment defeats itself.
+    Deliberately posts no review comment: a mute that costs a comment defeats
+    itself. The state note is the one exception, and only when this is the
+    first thing the bot has ever written on the MR.
     """
     try:
         _, mr = gitlab_client.fetch_mr(project_id, mr_iid)

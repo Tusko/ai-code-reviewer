@@ -55,6 +55,20 @@ class ReviewQueue:
             self._cv.notify()
             return True
 
+    def peek(self, key: str) -> object:
+        """Returns the job queued under key, or None. Used to merge payloads."""
+        with self._cv:
+            return self._items.get(key)
+
+    def drop(self, key: str) -> bool:
+        """Removes a not-yet-started job. Returns whether there was one.
+
+        A /sidorovich stop is worthless if it waits behind the very review it
+        was typed to stop, so the mute drops that review outright.
+        """
+        with self._cv:
+            return self._items.pop(key, None) is not None
+
     def take(self) -> object:
         with self._cv:
             while not self._items:
