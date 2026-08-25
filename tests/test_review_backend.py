@@ -83,3 +83,69 @@ def test_review_chat_without_key_reports_error(monkeypatch):
     monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
     result = openrouter_client.review_chat("sys", "user", 30)
     assert result.failed is True
+
+
+from reviewer import pipeline
+from reviewer.chat_types import LGTM_TEXT, ChatResult
+from reviewer.diff_parser import FileDiff, Hunk
+from reviewer.pipeline import ReviewState
+
+
+def _fd(path="a.py"):
+    return FileDiff(
+        old_path=path, new_path=path, is_new=False, is_deleted=False,
+        is_renamed=False, is_binary=False,
+        hunks=(Hunk(1, 1, (" ctx", "+added")),),
+    )
+
+
+class _MR:
+    pass
+
+
+def test_review_state_trips_after_two_ratelimits():
+    state = ReviewState()
+    assert state.open is True
+    state.record("ratelimit")
+    assert state.open is True
+    state.record("ratelimit")
+    assert state.open is False
+
+
+def test_review_state_resets_on_success():
+    state = ReviewState()
+    state.record("ratelimit")
+    state.record("stop")
+    state.record("ratelimit")
+    assert state.open is True
+
+
+def test_review_file_calls_openrouter_not_ollama(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: (
+            calls.append("openrouter"),
+            ChatResult(LGTM_TEXT, "stop", 0, 0, 0.0),
+        )[1],
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("ollama_client.chat must not be called for review")
+
+    monkeypatch.setattr("reviewer.ollama_client.chat", _boom)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    outcome = pipeline.review_file(_MR(), _fd(), "")
+    assert calls == ["openrouter"]
+    assert outcome.status == "clean"
+
+
+def test_review_file_records_ratelimit_on_state(monkeypatch):
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: ChatResult("", "ratelimit", 0, 0, 0.0),
+    )
+    state = ReviewState()
+    outcome = pipeline.review_file(_MR(), _fd(), "", None, state)
+    assert outcome.status == "error"
+    assert state.ratelimits == 1

@@ -120,7 +120,7 @@ def test_review_file_skips_when_no_ladder_level_fits(monkeypatch):
 
 def test_review_file_reports_error_on_chat_failure(monkeypatch):
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result("boom", done_reason="error"),
     )
     outcome = review_file(FakeMR(), fd("a.py"), context="")
@@ -129,7 +129,7 @@ def test_review_file_reports_error_on_chat_failure(monkeypatch):
 
 def test_review_file_reports_error_on_timeout(monkeypatch):
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result("partial", done_reason="timeout"),
     )
     outcome = review_file(FakeMR(), fd("a.py"), context="")
@@ -141,7 +141,7 @@ def test_review_file_reports_error_on_incomplete_stream(monkeypatch):
     # C1 regression: an interrupted stream (no terminal payload) must never
     # be reported as "clean" — an absence of signal is not a positive result.
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result("", done_reason="incomplete"),
     )
     outcome = review_file(FakeMR(), fd("a.py"), context="")
@@ -153,7 +153,7 @@ def test_review_file_reports_error_on_empty_response(monkeypatch):
     # C1 regression: done_reason == "stop" with empty text is also an absence
     # of signal, not a clean verdict.
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result("", done_reason="stop"),
     )
     outcome = review_file(FakeMR(), fd("a.py"), context="")
@@ -163,7 +163,7 @@ def test_review_file_reports_error_on_empty_response(monkeypatch):
 
 def test_review_file_is_clean_when_response_starts_with_lgtm(monkeypatch):
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result("LGTM. Looks fine."),
     )
     inline_calls = []
@@ -182,7 +182,7 @@ def test_review_file_is_clean_when_response_starts_with_lgtm(monkeypatch):
 
 def test_review_file_posts_inline_when_finding_and_position_accepted(monkeypatch):
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result("**🔴 [BLOCKER]**\nSomething bad."),
     )
     inline_calls = []
@@ -203,7 +203,7 @@ def test_review_file_posts_inline_when_finding_and_position_accepted(monkeypatch
 
 def test_review_file_falls_back_to_note_when_inline_rejected(monkeypatch):
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result("**🔴 [BLOCKER]**\nSomething bad."),
     )
     inline_calls = []
@@ -223,7 +223,7 @@ def test_review_file_falls_back_to_note_when_inline_rejected(monkeypatch):
 
 def test_review_file_marks_truncated_response_but_still_posts(monkeypatch):
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result(
             "**🔴 [BLOCKER]**\nSomething bad but cut off", done_reason="length",
         ),
@@ -250,7 +250,7 @@ def test_review_file_reports_partial_l2_coverage_when_hunk_exceeds_budget(monkey
     monkeypatch.setattr(pipeline.prompt_mod, "fits",
                          lambda text: text in ("hunk1-text",))
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result("**🔴 [BLOCKER]**\nbad"),
     )
     monkeypatch.setattr(pipeline.gitlab_client, "post_inline", lambda *a, **k: True)
@@ -401,7 +401,7 @@ def test_review_file_posts_sidorovich_voice(monkeypatch):
     monkeypatch.setattr("reviewer.config.SNARK", True)
     monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", "sk-or-test")
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result(DRY_FINDING),
     )
     monkeypatch.setattr(
@@ -533,7 +533,7 @@ def test_voice_success_resets_the_failure_counter(monkeypatch):
 
 def test_review_file_skips_bare_lgtm_without_punctuation(monkeypatch):
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline, "review_chat",
         lambda system, user, deadline_s: _chat_result("LGTM"),
     )
     monkeypatch.setattr(

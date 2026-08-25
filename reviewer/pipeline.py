@@ -3,14 +3,43 @@ import time
 from dataclasses import dataclass
 from typing import Sequence
 
-from reviewer import config, gitlab_client, openrouter_client, prompt as prompt_mod
+from reviewer import (
+    config, gitlab_client, ollama_client, openrouter_client, prompt as prompt_mod,
+)
 from reviewer.chat_types import FINDING_TAGS, LGTM_TEXT, ChatResult
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.filters import is_reviewable
 from reviewer.memes import snark
-from reviewer.ollama_client import chat
+from reviewer.openrouter_client import review_chat
 from reviewer.queue import DedupeCache
 from reviewer.voice import VoiceState, flavor_review, prefer_ukrainian
+
+# Consecutive rate-limited review calls before the run gives up. On the paid
+# tier this should never fire; it exists because OPENROUTER_REVIEW_MODEL is a
+# knob and someone will eventually point it at a `:free` model.
+REVIEW_FAILURE_LIMIT = 2
+
+
+class ReviewState:
+    """Per-MR circuit breaker for rate-limited review calls."""
+
+    def __init__(self) -> None:
+        self.ratelimits = 0
+
+    @property
+    def open(self) -> bool:
+        return self.ratelimits < REVIEW_FAILURE_LIMIT
+
+    def record(self, done_reason: str) -> None:
+        if done_reason == "ratelimit":
+            self.ratelimits += 1
+            if not self.open:
+                logging.warning(
+                    "Review stopped for this MR after %s consecutive rate limits",
+                    self.ratelimits,
+                )
+        else:
+            self.ratelimits = 0
 
 
 @dataclass(frozen=True)
@@ -66,7 +95,11 @@ def build_prompt_ladder(path: str, hunks: Sequence[Hunk], context: str) -> list[
 
 
 def review_file(
-    mr, file_diff: FileDiff, context: str, voice: "VoiceState | None" = None,
+    mr,
+    file_diff: FileDiff,
+    context: str,
+    voice: "VoiceState | None" = None,
+    review_state: "ReviewState | None" = None,
 ) -> FileOutcome:
     path = file_diff.new_path
     ladder = build_prompt_ladder(path, file_diff.hunks, context)
@@ -97,7 +130,11 @@ def review_file(
     bodies: list[str] = []
     truncated = False
     for text in prompts:
-        result = chat(prompt_mod.SYSTEM_PROMPT, text, deadline_s=config.PER_FILE_TIMEOUT_S)
+        result = review_chat(
+            prompt_mod.SYSTEM_PROMPT, text, deadline_s=config.PER_FILE_TIMEOUT_S,
+        )
+        if review_state is not None:
+            review_state.record(result.done_reason)
         if result.failed:
             return FileOutcome(path, "error", result.done_reason)
         if result.done_reason == "timeout":
@@ -211,7 +248,7 @@ def summary_chat(
             elapsed_s=0.0,
         )
     logging.warning("Falling back to Ollama %s for the summary", config.OLLAMA_MODEL)
-    return chat(
+    return ollama_client.chat(
         system, user, deadline_s, temperature=0.95, seed=None, history=history,
     )
 

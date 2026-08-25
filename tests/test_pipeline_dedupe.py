@@ -243,7 +243,7 @@ def test_summary_chat_uses_openrouter_when_keyed(monkeypatch):
         lambda *a, **k: called.append(("or", k.get("temperature"))) or _sidorovich(),
     )
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline.ollama_client, "chat",
         lambda *a, **k: called.append(("ollama", None)) or _sidorovich(),
     )
     result = pipeline.summary_chat("sys", "user", 30)
@@ -256,7 +256,7 @@ def test_summary_chat_without_key_reports_voice_unavailable(monkeypatch):
     monkeypatch.setattr(pipeline.config, "OPENROUTER_API_KEY", None)
     monkeypatch.setattr(pipeline.config, "SIDOROVICH_OLLAMA_FALLBACK", False)
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline.ollama_client, "chat",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call Ollama")),
     )
     result = pipeline.summary_chat("sys", "user", 30)
@@ -273,7 +273,7 @@ def test_summary_chat_falls_back_to_ollama_without_key(monkeypatch):
         lambda *a, **k: called.append("or") or _sidorovich(),
     )
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline.ollama_client, "chat",
         lambda *a, **k: called.append("ollama") or _sidorovich(),
     )
     pipeline.summary_chat("sys", "user", 30)
@@ -293,7 +293,7 @@ def test_summary_chat_falls_back_to_ollama_when_openrouter_fails(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline.ollama_client, "chat",
         lambda *a, **k: called.append("ollama") or _sidorovich("з ollama"),
     )
     result = pipeline.summary_chat("sys", "user", 30)
@@ -312,7 +312,7 @@ def test_summary_chat_falls_back_to_ollama_when_openrouter_empty(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        pipeline, "chat",
+        pipeline.ollama_client, "chat",
         lambda *a, **k: _sidorovich("з ollama"),
     )
     result = pipeline.summary_chat("sys", "user", 30)
@@ -323,7 +323,7 @@ def test_summary_chat_rate_limit_does_not_reach_ollama_by_default(monkeypatch):
     monkeypatch.setattr(pipeline.config, "OPENROUTER_API_KEY", "sk-or-test")
     monkeypatch.setattr(pipeline.config, "SIDOROVICH_OLLAMA_FALLBACK", False)
     called = []
-    monkeypatch.setattr(pipeline, "chat", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(pipeline.ollama_client, "chat", lambda *a, **k: called.append(1))
     monkeypatch.setattr(
         pipeline.openrouter_client, "chat",
         lambda *a, **k: ChatResult(
