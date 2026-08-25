@@ -286,22 +286,166 @@ def test_unreadable_ledger_skips_the_run(harness, monkeypatch, caplog):
     assert "Critical error" not in caplog.text
 
 
-def test_rate_limited_files_are_not_recorded(harness, monkeypatch):
-    """A rate-limited file must be retried on the next push, so its hunks
-    must not enter the ledger."""
+def test_a_rate_limited_run_records_nothing_and_says_nothing(harness, monkeypatch):
+    """A backend outage must cost neither a comment nor a budget slot.
+
+    The files stay out of the ledger so the next push retries them, and no
+    summary is posted: one note per push would mute the MR over an outage that
+    fixes itself, and the command that lifts a mute is a human action.
+    """
     recorder, state = harness
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
-    monkeypatch.setattr("reviewer.config.MR_COMMENT_BUDGET", 30)
     monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
     monkeypatch.setattr(
         "reviewer.pipeline.review_chat",
-        lambda system, user, deadline_s: pipeline.ChatResult("", "ratelimit", 0, 0, 0.0),
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "", "ratelimit", 0, 0, 0.0,
+        ),
     )
-    diffs = [fd(f"f{i}.py") for i in range(5)]
-    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: diffs)
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(5)],
+    )
     pipeline.review_merge_request(1, 1)
 
-    assert state["ledger"].hunks == (), "no hunk may be recorded on a rate limit"
     assert recorder.inline == []
-    summary = recorder.notes[0]
-    assert "rate limited" in summary
+    assert recorder.notes == []
+    assert state["ledger"].hunks == ()
+    assert state["ledger"].posted == 0, "a run that reviewed nothing costs nothing"
+    assert state["ledger"].muted is False, "an outage must not mute the MR"
+
+
+def test_force_does_not_bypass_the_file_ceiling(harness, monkeypatch):
+    """The spec is explicit: /review must not re-enable a 300-file review.
+
+    An override that does is the same foot-gun in a different shape.
+    """
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 3)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_file",
+        lambda *a: pytest.fail("an oversized MR must never be reviewed per file"),
+    )
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(10)],
+    )
+    pipeline.review_merge_request(1, 1, force=True)
+    assert recorder.inline == []
+    assert len(recorder.notes) == 1, "one refusal, not ten reviews"
+
+
+def test_force_on_an_oversized_mr_answers_instead_of_vanishing(harness, monkeypatch):
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 3)
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(10)],
+    )
+    pipeline.review_merge_request(1, 1)
+    pipeline.review_merge_request(1, 1, force=True)
+    assert len(recorder.notes) == 2, "the oversized note, then an answer to /review"
+    assert "нема чого дивитись" in recorder.notes[1].lower()
+
+
+def test_force_on_a_fully_reviewed_mr_answers_instead_of_vanishing(harness, monkeypatch):
+    """render_budget_exhausted tells the human to type /review. Answering
+    that with total silence reads as a dead bot."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    diff = fd("a.py")
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [diff])
+    state["ledger"] = Ledger().record([hunk_key("a.py", h) for h in diff.hunks])
+    pipeline.review_merge_request(1, 1, force=True)
+    assert len(recorder.notes) == 1
+    assert "нема чого дивитись" in recorder.notes[0].lower()
+
+
+def test_a_failing_ledger_save_stops_the_run_before_it_posts(harness, monkeypatch):
+    """A save that fails AFTER the comment is out leaves posted=0 in GitLab
+    forever, so every later push starts from zero with no ceiling at all."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(10)],
+    )
+
+    def _boom(self):
+        raise RuntimeError("gitlab said 422")
+
+    monkeypatch.setattr("reviewer.pipeline.LedgerStore.save", _boom, raising=False)
+
+    for _ in range(20):
+        pipeline.review_merge_request(1, 1)
+
+    assert recorder.inline == [], "nothing may be posted once the ledger is unwritable"
+    assert recorder.notes == []
+
+
+def test_a_refunded_slot_is_not_charged_twice(harness, monkeypatch):
+    """A clean file is charged up front and must get the slot back."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_file",
+        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+            file_diff.new_path, "clean", "",
+        ),
+    )
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(5)],
+    )
+    pipeline.review_merge_request(1, 1)
+    assert state["ledger"].posted == 1, "five clean files plus one summary note"
+
+
+def _release(monkeypatch, commits):
+    monkeypatch.setattr(FakeMR, "source_branch", "release/2026.08", raising=False)
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_commits", lambda mr: commits)
+    monkeypatch.setattr(
+        "reviewer.pipeline.summary_chat",
+        lambda *a, **k: pipeline.ChatResult("роаст", "stop", 0, 0, 0.0),
+    )
+    monkeypatch.setattr("reviewer.pipeline.dedupe", pipeline.DedupeCache(maxsize=8))
+
+
+def test_a_release_summary_is_not_reposted_after_a_restart(harness, monkeypatch):
+    """The old dedupe lived in process memory, so every container restart
+    re-posted the same roast. The ledger outlives the process."""
+    recorder, _ = harness
+    _release(monkeypatch, [{"short_id": "aaa", "title": "fix a", "author": "x"}])
+
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.notes) == 1
+
+    monkeypatch.setattr("reviewer.pipeline.dedupe", pipeline.DedupeCache(maxsize=8))
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.notes) == 1, "a restart must not repeat the roast"
+
+
+def test_a_release_mr_cannot_outrun_the_comment_budget(harness, monkeypatch):
+    """Every path that posts is under the ceiling, the release path included."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MR_COMMENT_BUDGET", 3)
+    commits = [{"short_id": "aaa", "title": "fix a", "author": "x"}]
+    _release(monkeypatch, commits)
+
+    for i in range(30):
+        # New commits every push, so nothing is ever deduped away.
+        commits[0] = {"short_id": f"c{i}", "title": f"fix {i}", "author": "x"}
+        monkeypatch.setattr("reviewer.pipeline.dedupe", pipeline.DedupeCache(maxsize=8))
+        pipeline.review_merge_request(1, 1)
+
+    assert len(recorder.notes) <= config.MR_COMMENT_BUDGET, (
+        f"30 pushes posted {len(recorder.notes)} notes against a budget of 3"
+    )
+    assert state["ledger"].posted == config.MR_COMMENT_BUDGET

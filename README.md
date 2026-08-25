@@ -234,7 +234,7 @@ set, each inline finding is then rewritten as Sidorovich (surzhyk, swearing)
 by a second, separate OpenRouter call (`OPENROUTER_MODEL`) afterwards — same
 headings, same `*Fix:*` blocks, only the prose changes. If that rewrite
 fails, rate-limits, or mutates a finding, the dry review is posted instead.
-After `VOICE_FAILURE_LIMIT` consecutive voice failures (free-tier rate
+After two (`VOICE_FAILURE_LIMIT` in `reviewer/voice.py`, not configurable) consecutive voice failures (free-tier rate
 limits, mostly) the rest of that MR stays dry, so one merge request never
 mixes voiced and dry comments. `SNARK=false` keeps comments professional.
 

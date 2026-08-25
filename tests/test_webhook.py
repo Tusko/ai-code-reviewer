@@ -182,6 +182,17 @@ def test_a_human_quoting_the_budget_note_does_not_lift_the_mute():
     assert should_review("Note Hook", _note_hook(note)) is None
 
 
+def test_quoting_a_bare_command_does_not_issue_it():
+    """Replying to somebody else's /review must not re-run the review."""
+    assert should_review("Note Hook", _note_hook("> /review\n\nце вже робили")) is None
+    assert should_review("Note Hook", _note_hook("> /sidorovich stop\n\nчому?")) is None
+
+
+def test_a_command_below_a_quote_still_works():
+    note = "> старий коментар\n\n/review"
+    assert should_review("Note Hook", _note_hook(note)) == ReviewJob(3, 7, True, "review")
+
+
 def test_stopwatch_is_not_a_kill_switch():
     assert should_review("Note Hook", _note_hook("/sidorovich stopwatch")) is None
 

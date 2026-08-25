@@ -61,6 +61,10 @@ class Ledger:
     def spend(self, n: int = 1) -> "Ledger":
         return replace(self, posted=self.posted + n)
 
+    def refund(self, n: int = 1) -> "Ledger":
+        """Gives back a slot charged for a comment that was never posted."""
+        return replace(self, posted=max(0, self.posted - n))
+
     def mute(self) -> "Ledger":
         return replace(self, muted=True)
 

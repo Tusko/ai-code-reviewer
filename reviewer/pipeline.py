@@ -32,11 +32,14 @@ class ReviewState:
         return self.ratelimits < REVIEW_FAILURE_LIMIT
 
     def record(self, done_reason: str) -> None:
-        if done_reason == "ratelimit":
+        # "error" counts too: a missing API key fails every single file with
+        # done_reason="error", and without this the breaker never trips and
+        # the run calls out once per file for nothing.
+        if done_reason in ("ratelimit", "error"):
             self.ratelimits += 1
             if not self.open:
                 logging.warning(
-                    "Review stopped for this MR after %s consecutive rate limits",
+                    "Review stopped for this MR after %s consecutive failures",
                     self.ratelimits,
                 )
         else:
@@ -309,7 +312,58 @@ def summary_chat(
     )
 
 
-def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
+def backend_is_dead(outcomes: Sequence[FileOutcome]) -> bool:
+    """Whether every file that reached the model came back an error.
+
+    Distinguishes "the review backend is broken" from "we ran out of time or
+    budget". The first is transient and must cost nothing; the second is worth
+    a summary, because the reader has to know the MR was not fully looked at.
+    """
+    attempted = [o for o in outcomes if o.status in ("reviewed", "clean", "error")]
+    return bool(attempted) and all(o.status == "error" for o in attempted)
+
+
+def _charge(store, mr_iid: int, head: str = None) -> bool:
+    """Persists the cost of a comment BEFORE it is posted. Returns whether it
+    is safe to post.
+
+    Charging afterwards is what makes a failing save unbounded: the comment
+    goes out, `posted` never reaches GitLab, and every later push starts from
+    zero with no ceiling at all. Charging first turns that same failure into
+    "one comment too few", which is the direction we can afford to be wrong in.
+    """
+    store.ledger = store.ledger.spend(1)
+    if head is not None:
+        store.ledger = store.ledger.at_head(head)
+    try:
+        store.save()
+        return True
+    except Exception as exc:
+        logging.error(
+            "MR !%s: review state could not be saved (%s); posting nothing",
+            mr_iid, exc,
+        )
+        return False
+
+
+def _save_quietly(store, mr_iid: int) -> None:
+    """Best-effort save for bookkeeping that no comment depends on."""
+    try:
+        store.save()
+    except Exception as exc:
+        logging.error("MR !%s: review state could not be saved: %s", mr_iid, exc)
+
+
+def render_nothing_to_do(reason: str) -> str:
+    """Answers a manual /review that found no work. Silence reads as a crash."""
+    lines = []
+    if config.SNARK:
+        lines.append(f"_{snark()}_\n")
+    lines.append(f"**Нема чого дивитись.** {reason}\n")
+    return "\n".join(lines)
+
+
+def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool, store) -> None:
     """Skip full review; post a Sidorovich commit-list roast instead."""
     commits = gitlab_client.fetch_commits(mr)
     if not commits:
@@ -317,8 +371,17 @@ def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
         return
 
     fingerprint = gitlab_client.commit_fingerprint(project_id, mr_iid, commits)
-    if not force and dedupe.seen(fingerprint):
+    if not force and (dedupe.seen(fingerprint) or store.ledger.head == fingerprint):
+        # Checked against the ledger too, not just the in-process cache: the
+        # cache is empty after every container restart, and this path used to
+        # re-post the same roast on each one.
         logging.info("MR !%s release/hotfix commits unchanged; skipping", mr_iid)
+        return
+    if store.ledger.remaining() <= 0:
+        logging.warning(
+            "MR !%s: release summary suppressed, MR_COMMENT_BUDGET=%s spent",
+            mr_iid, config.MR_COMMENT_BUDGET,
+        )
         return
 
     user = prompt_mod.build_commit_summary_prompt(commits)
@@ -342,6 +405,8 @@ def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
         # Not a transient failure — no model here can do the voice. Post the
         # plain digest and dedupe it, rather than retrying on every webhook.
         logging.info("MR !%s: no Sidorovich voice available; posting commit digest", mr_iid)
+        if not _charge(store, mr_iid, head=fingerprint):
+            return
         gitlab_client.post_note(mr, render_commit_digest(commits))
         dedupe.remember(fingerprint)
         return
@@ -352,6 +417,8 @@ def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool) -> None:
         )
         return
 
+    if not _charge(store, mr_iid, head=fingerprint):
+        return
     gitlab_client.post_note(mr, result.text.strip())
     dedupe.remember(fingerprint)
     logging.info("MR !%s release/hotfix summarised (%s commits)", mr_iid, len(commits))
@@ -394,7 +461,7 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             store.ledger = store.ledger.unmute_and_reset()
 
         if should_skip_branch(getattr(mr, "source_branch", "")):
-            summarize_release_mr(project_id, mr_iid, mr, force)
+            summarize_release_mr(project_id, mr_iid, mr, force, store)
             return
 
         file_diffs = gitlab_client.fetch_file_diffs(mr)
@@ -403,14 +470,23 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
 
         if len(reviewable) > config.MAX_MR_FILES:
             if not store.ledger.oversized:
+                store.ledger = store.ledger.mark_oversized()
+                if not _charge(store, mr_iid, head=head_sha):
+                    return
                 gitlab_client.post_note(mr, render_oversized(len(reviewable)))
-                store.ledger = store.ledger.spend(1).mark_oversized()
                 logging.info(
                     "MR !%s: %s reviewable files over MAX_MR_FILES=%s; posted one note",
                     mr_iid, len(reviewable), config.MAX_MR_FILES,
                 )
+                return
+            if force and _charge(store, mr_iid, head=head_sha):
+                # A human typed /review and deserves an answer, even a refusal.
+                gitlab_client.post_note(mr, render_nothing_to_do(
+                    f"{len(reviewable)} файлів — це більше за MAX_MR_FILES="
+                    f"{config.MAX_MR_FILES}. Поділи MR."))
+                return
             store.ledger = store.ledger.at_head(head_sha)
-            store.save()
+            _save_quietly(store, mr_iid)
             return
 
         fresh = drop_known_hunks(reviewable, store.ledger)
@@ -418,8 +494,14 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             # Every hunk has been reviewed already. Say nothing at all: this is
             # what makes a container restart or a no-op push cost zero comments.
             logging.info("MR !%s: no unreviewed hunks; staying silent", mr_iid)
+            if force and _charge(store, mr_iid, head=head_sha):
+                # render_budget_exhausted() tells the human to type /review.
+                # Answering that with nothing at all reads as a dead bot.
+                gitlab_client.post_note(mr, render_nothing_to_do(
+                    "Усе в цьому MR я вже дивився. Запуш щось нове."))
+                return
             store.ledger = store.ledger.at_head(head_sha)
-            store.save()
+            _save_quietly(store, mr_iid)
             return
 
         kept, outcomes = select_files(fresh, skipped)
@@ -456,11 +538,22 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                         content, file_diff.hunks, config.CONTEXT_WINDOW,
                     )
 
+            # Charged before review_file posts anything, and refunded below if
+            # it turns out nothing was posted. Saved per file, not once at the
+            # end: a crash mid-run would otherwise leave comments posted but
+            # unrecorded, and the next push would post every one of them again.
+            if not _charge(store, mr_iid):
+                outcomes.append(FileOutcome(
+                    file_diff.new_path, "skipped", "review state could not be saved",
+                ))
+                break
+
             try:
                 outcome = review_file(mr, file_diff, context, voice, review_state)
             except Exception as exc:
                 logging.error("Review failed for %s: %s", file_diff.new_path, exc)
                 outcomes.append(FileOutcome(file_diff.new_path, "error", str(exc)[:120]))
+                store.ledger = store.ledger.refund()
                 continue
 
             outcomes.append(outcome)
@@ -470,24 +563,32 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 store.ledger = store.ledger.record(
                     hunk_key(file_diff.new_path, h) for h in file_diff.hunks
                 )
-            if outcome.status == "reviewed":
-                store.ledger = store.ledger.spend(1)
-            # Saved per file, not once at the end: a crash mid-run would
-            # otherwise leave comments posted but unrecorded, and the next push
-            # would post every one of them again.
-            store.save()
+            if outcome.status != "reviewed":
+                store.ledger = store.ledger.refund()
+            _save_quietly(store, mr_iid)
 
         if store.ledger.remaining() <= 1:
-            gitlab_client.post_note(mr, render_budget_exhausted())
-            store.ledger = store.ledger.spend(1).mute().at_head(head_sha)
+            store.ledger = store.ledger.mute()
+            if _charge(store, mr_iid, head=head_sha):
+                gitlab_client.post_note(mr, render_budget_exhausted())
             logging.warning(
                 "MR !%s hit MR_COMMENT_BUDGET=%s; muted until /review",
                 mr_iid, config.MR_COMMENT_BUDGET,
             )
-        else:
+        elif backend_is_dead(outcomes):
+            # Every file we actually sent to the model came back an error: the
+            # backend is down, rate limited or unconfigured. A summary saying so
+            # would cost a slot per push and mute the MR over an outage that
+            # fixes itself, so say nothing. Nothing was recorded either, so the
+            # next push retries the lot.
+            logging.error(
+                "MR !%s: no file could be reviewed; staying silent so the next "
+                "push retries", mr_iid,
+            )
+            store.ledger = store.ledger.at_head(head_sha)
+            _save_quietly(store, mr_iid)
+        elif _charge(store, mr_iid, head=head_sha):
             gitlab_client.post_note(mr, render_summary(outcomes))
-            store.ledger = store.ledger.spend(1).at_head(head_sha)
-        store.save()
         logging.info("MR !%s reviewed in %.1fs", mr_iid, time.monotonic() - started)
 
     except Exception as exc:

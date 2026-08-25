@@ -45,6 +45,17 @@ REVIEW_RE = re.compile(r"(?<![\w/`])/review\b", re.IGNORECASE)
 STOP_RE = re.compile(r"(?<![\w/`])/sidorovich\s+stop\b", re.IGNORECASE)
 
 
+def strip_quotes(note: str) -> str:
+    """Drops blockquoted lines: quoting a command is not issuing one.
+
+    Without this, replying to a comment that says /review re-runs the review,
+    and quoting Sidorovich's budget note lifts the mute he just set.
+    """
+    return "\n".join(
+        line for line in note.splitlines() if not line.lstrip().startswith(">")
+    )
+
+
 @dataclass(frozen=True)
 class ReviewJob:
     project_id: int
@@ -90,7 +101,7 @@ def should_review(event_type: str, data: dict) -> ReviewJob | None:
     if event_type == "Note Hook":
         if attrs.get("noteable_type") != "MergeRequest":
             return None
-        note = (attrs.get("note") or "")
+        note = strip_quotes(attrs.get("note") or "")
         if not (STOP_RE.search(note) or REVIEW_RE.search(note)):
             return None
         # The budget note ends with "кинь `/review`", and GitLab fires a Note
