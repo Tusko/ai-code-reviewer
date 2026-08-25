@@ -5,7 +5,7 @@ from typing import Sequence
 import requests
 
 from reviewer import config
-from reviewer.ollama_client import ChatResult, clean_response
+from reviewer.chat_types import ChatResult, clean_response
 
 # 429 on a free-tier model and 5xx from an upstream provider are both transient:
 # OpenRouter routes the next attempt to a different provider more often than not.

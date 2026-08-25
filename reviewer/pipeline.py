@@ -5,10 +5,11 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from reviewer import config, gitlab_client, openrouter_client, prompt as prompt_mod
+from reviewer.chat_types import FINDING_TAGS, LGTM_TEXT, ChatResult
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.filters import is_reviewable
 from reviewer.memes import snark
-from reviewer.ollama_client import LGTM_TEXT, ChatResult, chat
+from reviewer.ollama_client import chat
 from reviewer.queue import DedupeCache
 
 VOICE_DEADLINE_S = 20
@@ -16,7 +17,6 @@ VOICE_DEADLINE_S = 20
 # OpenRouter models rate-limit mid-review; retrying every file just makes half
 # the comments Sidorovich and half of them dry.
 VOICE_FAILURE_LIMIT = 2
-FINDING_TAGS = ("[BLOCKER]", "[SUGGESTION]", "[NIT]")
 FENCE_BODY_RE = re.compile(r"```(?:\w*)\n?(.*?)```", re.DOTALL)
 
 
