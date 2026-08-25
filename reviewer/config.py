@@ -91,6 +91,18 @@ SNARK = env_bool("SNARK", True)
 PER_FILE_TIMEOUT_S = env_int("PER_FILE_TIMEOUT_S", 90)
 MR_TIMEOUT_S = env_int("MR_TIMEOUT_S", 480)
 MAX_FILES = env_int("MAX_FILES", 40)
+# Reviewable files above which per-file review is skipped entirely and the MR
+# gets one note instead. A 300-file MR produced 592 comments before this.
+MAX_MR_FILES = env_int("MAX_MR_FILES", 60)
+# Comments the bot may post in one MR across its whole lifetime, counting inline
+# discussions, summaries and the oversized note. The state note is excluded: it
+# is created once and edited thereafter.
+MR_COMMENT_BUDGET = env_int("MR_COMMENT_BUDGET", 30)
+# Reviewed hunk keys retained per MR before the oldest are dropped. 2000 keys is
+# roughly 30 KB of marker against a 1 MB GitLab note limit.
+LEDGER_MAX_HUNKS = env_int("LEDGER_MAX_HUNKS", 2000)
+# Global kill switch. False makes the webhook a no-op without touching GitLab.
+SIDOROVICH_ENABLED = env_bool("SIDOROVICH_ENABLED", True)
 QUEUE_MAXSIZE = env_int("QUEUE_MAXSIZE", 32)
 DEDUPE_CACHE_SIZE = env_int("DEDUPE_CACHE_SIZE", 256)
 
