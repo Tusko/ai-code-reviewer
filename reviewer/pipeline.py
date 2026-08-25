@@ -52,6 +52,10 @@ class FileOutcome:
     path: str
     status: str   # "reviewed" | "clean" | "skipped" | "error"
     detail: str
+    # False when the comment may never have reached GitLab. Such a file keeps
+    # its budget slot (it may have posted) but stays out of the ledger, so the
+    # next push retries it instead of losing the finding forever.
+    settled: bool = True
 
 
 dedupe = DedupeCache()
@@ -202,7 +206,9 @@ def review_file(
         # slot charged. Paying twice for one comment is survivable; posting one
         # for free is how the ceiling silently disengages.
         logging.error("Post failed for %s (the comment may exist anyway): %s", path, exc)
-        return FileOutcome(path, "reviewed", "post failed; comment may be duplicated")
+        return FileOutcome(
+            path, "reviewed", f"could not be posted ({exc})", settled=False,
+        )
 
     detail = l2_detail if l2_detail else f"{len(bodies)} response(s)"
     if truncated:
@@ -228,9 +234,16 @@ def render_summary(outcomes: Sequence[FileOutcome]) -> str:
     if config.SNARK:
         lines.append(f"\n_{snark()}_")
 
-    if reviewed:
-        lines.append(f"\n**Findings on {len(reviewed)} file(s):** "
-                     + ", ".join(f"`{o.path}`" for o in reviewed))
+    delivered = [o for o in reviewed if o.settled]
+    undelivered = [o for o in reviewed if not o.settled]
+
+    if delivered:
+        lines.append(f"\n**Findings on {len(delivered)} file(s):** "
+                     + ", ".join(f"`{o.path}`" for o in delivered))
+    if undelivered:
+        lines.append("\n**Findings that could not be posted "
+                     "(retried on the next push):**")
+        lines.extend(f"- `{o.path}` — {o.detail}" for o in undelivered)
     if clean and not reviewed and not errored:
         lines.append("\nLGTM. No logic or security issues found in the changed lines.")
     elif clean:
@@ -345,12 +358,14 @@ def _charge(store, mr_iid: int, head: str = None) -> bool:
         return False
 
 
-def _save_quietly(store, mr_iid: int) -> None:
-    """Best-effort save for bookkeeping that no comment depends on."""
+def _save_quietly(store, mr_iid: int) -> bool:
+    """Best-effort save for bookkeeping. Returns whether it stuck."""
     try:
         store.save()
+        return True
     except Exception as exc:
         logging.error("MR !%s: review state could not be saved: %s", mr_iid, exc)
+        return False
 
 
 def render_nothing_to_do(reason: str) -> str:
@@ -559,7 +574,7 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 continue
 
             outcomes.append(outcome)
-            if outcome.status in ("reviewed", "clean"):
+            if outcome.status in ("reviewed", "clean") and outcome.settled:
                 # Only settled files are recorded. An errored or rate-limited
                 # file must be retried on the next push, so its hunks stay out.
                 store.ledger = store.ledger.record(
@@ -570,6 +585,9 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             _save_quietly(store, mr_iid)
 
         settled = any(o.status in ("reviewed", "clean") for o in outcomes)
+        if settled and store.ledger.outage_reported:
+            # The backend answered again, so the next outage is worth a report.
+            store.ledger = store.ledger.clear_outage()
         if store.ledger.remaining() <= 1:
             store.ledger = store.ledger.mute()
             if _charge(store, mr_iid, head=head_sha):
@@ -578,17 +596,22 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 "MR !%s hit MR_COMMENT_BUDGET=%s; muted until /review",
                 mr_iid, config.MR_COMMENT_BUDGET,
             )
-        elif not settled and head_sha and store.ledger.head == head_sha:
-            # Nothing could be reviewed, and we already said so for this exact
-            # head. Repeating it on every webhook retry is noise; a real push
-            # moves the head and earns a fresh report. Nothing is recorded
-            # either way, so the files are retried the moment the backend
-            # recovers.
-            logging.error(
-                "MR !%s: still nothing reviewable at %s; already reported",
-                mr_iid, head_sha[:8] or "?",
-            )
-            _save_quietly(store, mr_iid)
+        elif not settled:
+            # A run that got nothing out of the model must cost nothing. Keying
+            # this on the head SHA was wrong: developers push, so a day-long
+            # outage spent one slot per push and muted the MR, and a muted MR
+            # reviews nothing once the backend comes back. Report it free, once
+            # per outage, and record nothing so the next push retries the lot.
+            if force or not store.ledger.outage_reported:
+                store.ledger = store.ledger.report_outage()
+                # Persisted first even though the note is free: if the flag
+                # cannot be stored, the note would repeat on every push.
+                if _save_quietly(store, mr_iid):
+                    gitlab_client.post_note(mr, render_summary(outcomes))
+            else:
+                logging.error(
+                    "MR !%s: still nothing reviewable; already reported", mr_iid,
+                )
         elif _charge(store, mr_iid, head=head_sha):
             gitlab_client.post_note(mr, render_summary(outcomes))
         logging.info("MR !%s reviewed in %.1fs", mr_iid, time.monotonic() - started)

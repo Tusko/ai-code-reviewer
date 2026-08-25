@@ -42,6 +42,7 @@ class Ledger:
     posted: int = 0
     muted: bool = False
     oversized: bool = False
+    outage_reported: bool = False
     hunks: tuple[str, ...] = ()
 
     def remaining(self) -> int:
@@ -71,6 +72,13 @@ class Ledger:
     def unmute_and_reset(self) -> "Ledger":
         return replace(self, muted=False, posted=0)
 
+    def report_outage(self) -> "Ledger":
+        """Marks that the human has been told the backend produced nothing."""
+        return replace(self, outage_reported=True)
+
+    def clear_outage(self) -> "Ledger":
+        return replace(self, outage_reported=False)
+
     def mark_oversized(self) -> "Ledger":
         return replace(self, oversized=True)
 
@@ -84,6 +92,7 @@ def to_marker(value: Ledger) -> str:
         "posted": value.posted,
         "muted": value.muted,
         "oversized": value.oversized,
+        "outage_reported": value.outage_reported,
         "hunks": list(value.hunks),
     }
     return f"<!-- {MARKER_PREFIX} {json.dumps(payload, separators=(',', ':'))} -->"
@@ -134,6 +143,13 @@ def parse_marker(body: str) -> Ledger:
             f"state marker field 'oversized' must be a bool, got {type(oversized).__name__}",
         )
 
+    outage_reported = payload.get("outage_reported", False)
+    if not isinstance(outage_reported, bool):
+        raise LedgerUnavailable(
+            "state marker field 'outage_reported' must be a bool, got "
+            f"{type(outage_reported).__name__}",
+        )
+
     hunks = payload.get("hunks", [])
     if not isinstance(hunks, list) or not all(isinstance(key, str) for key in hunks):
         raise LedgerUnavailable(
@@ -145,6 +161,7 @@ def parse_marker(body: str) -> Ledger:
         posted=posted,
         muted=muted,
         oversized=oversized,
+        outage_reported=outage_reported,
         hunks=tuple(hunks),
     )
 

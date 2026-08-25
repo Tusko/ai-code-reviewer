@@ -390,7 +390,7 @@ def test_a_failing_ledger_save_stops_the_run_before_it_posts(harness, monkeypatc
         pipeline.review_merge_request(1, 1)
 
     assert recorder.inline == [], "nothing may be posted once the ledger is unwritable"
-    assert recorder.notes == []
+    assert recorder.notes == [], "not even the free outage note, which would repeat"
 
 
 def test_a_refunded_slot_is_not_charged_twice(harness, monkeypatch):
@@ -481,13 +481,13 @@ def test_a_comment_that_may_have_posted_keeps_its_slot(harness, monkeypatch):
     for _ in range(20):
         pipeline.review_merge_request(1, 1)
 
+    # Retried, because the post may never have landed and losing a real finding
+    # silently is worse than a duplicate. The budget is what bounds the retries.
     assert len(recorder.inline) <= config.MR_COMMENT_BUDGET, (
         f"{len(recorder.inline)} comments against a budget of "
         f"{config.MR_COMMENT_BUDGET}"
     )
-    # Charged, so the files count as settled and 19 further pushes cost nothing.
-    assert len(recorder.inline) == 10
-    assert state["ledger"].posted == 11, "ten comments plus the run summary"
+    assert state["ledger"].muted is True, "the budget, not the retry loop, stops it"
 
 
 def test_two_broken_files_do_not_kill_review_of_the_healthy_ones(harness, monkeypatch):
@@ -533,7 +533,157 @@ def test_a_file_that_fails_before_posting_gives_its_slot_back(harness, monkeypat
     pipeline.review_merge_request(1, 1)
 
     assert recorder.inline == []
-    assert len(recorder.notes) == 1, "just the summary saying they all failed"
-    assert state["ledger"].posted == 1, (
-        "five refunded charges plus the summary note, not six"
+    assert len(recorder.notes) == 1, "one free report saying they all failed"
+    assert state["ledger"].posted == 0, (
+        "five charges, five refunds: a run that reviewed nothing costs nothing"
     )
+
+
+def _dead_backend(monkeypatch, files=10):
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult("", "error", 0, 0, 0.0),
+    )
+    heads = {"n": 0}
+
+    def _diffs(mr):
+        heads["n"] += 1
+        FakeMR.diff_refs = {"base_sha": "b", "start_sha": "s",
+                            "head_sha": f"sha{heads['n']}"}
+        return [fd(f"f{i}.py") for i in range(files)]
+
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", _diffs)
+
+
+def test_an_outage_costs_nothing_no_matter_how_many_pushes(harness, monkeypatch):
+    """Developers push. Charging a slot per push burned the whole budget over a
+    day-long outage and muted the MR — and a muted MR reviews nothing once the
+    backend comes back, which is the opposite of what an outage should cost."""
+    recorder, state = harness
+    _dead_backend(monkeypatch)
+
+    for _ in range(40):
+        pipeline.review_merge_request(1, 1)
+
+    assert len(recorder.notes) == 1, "told once, not once per push"
+    assert state["ledger"].posted == 0, "an outage must not spend the budget"
+    assert state["ledger"].muted is False, "and must never mute the MR"
+    assert state["ledger"].hunks == (), "nothing settled, so nothing is recorded"
+
+
+def test_the_mr_reviews_normally_once_the_backend_recovers(harness, monkeypatch):
+    recorder, state = harness
+    _dead_backend(monkeypatch)
+    for _ in range(40):
+        pipeline.review_merge_request(1, 1)
+
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+        ),
+    )
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.inline) == 10, "every file the outage swallowed is retried"
+
+
+def test_review_answers_during_an_outage(harness, monkeypatch):
+    """render_nothing_to_do exists because silence reads as a crash. A human
+    who types /review while the backend is down must not get nothing."""
+    recorder, _ = harness
+    _dead_backend(monkeypatch)
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.notes) == 1
+
+    pipeline.review_merge_request(1, 1, force=True)
+    assert len(recorder.notes) == 2, "/review always answers"
+
+
+def test_an_undelivered_finding_is_not_reported_as_delivered(harness, monkeypatch):
+    """Claiming a finding was posted when the post failed leaves no trace at
+    all: the hunk is settled, the comment does not exist, and the note lies."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.post_inline", lambda *a: False,
+    )
+
+    def _note(mr, body):
+        if body.startswith("### "):
+            raise ConnectionError("gitlab hung up")
+        recorder.notes.append(body)
+
+    monkeypatch.setattr("reviewer.gitlab_client.post_note", _note)
+    diff = fd("a.py")
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [diff])
+
+    pipeline.review_merge_request(1, 1)
+
+    assert "Findings on" not in recorder.notes[0], "nothing was actually delivered"
+    assert "could not be posted" in recorder.notes[0]
+    assert hunk_key("a.py", diff.hunks[0]) not in state["ledger"].hunks, (
+        "an undelivered finding must be retried, not settled forever"
+    )
+
+
+def test_a_refund_returns_exactly_what_was_charged(harness, monkeypatch):
+    """One good file, four that die before posting. Refunding more than was
+    charged inflates the ceiling; refunding less mutes the MR early."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    calls = {"n": 0}
+
+    def _one_good_then_boom(mr, file_diff, context, voice, review_state):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            recorder.inline.append((file_diff.new_path, "finding"))
+            return pipeline.FileOutcome(file_diff.new_path, "reviewed", "1 response(s)")
+        raise RuntimeError("blew up before posting")
+
+    monkeypatch.setattr("reviewer.pipeline.review_file", _one_good_then_boom)
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(5)],
+    )
+    pipeline.review_merge_request(1, 1)
+
+    assert state["ledger"].posted == 2, (
+        "one finding plus one summary note; the four failures are refunded whole"
+    )
+
+
+def test_a_second_outage_is_reported_again(harness, monkeypatch):
+    """"Told once" must mean once per outage, not once per merge request:
+    otherwise the first blip buys permanent silence for every later one."""
+    recorder, state = harness
+    _dead_backend(monkeypatch, files=2)
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.notes) == 1
+
+    healthy = lambda system, user, deadline_s: pipeline.ChatResult(
+        "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+    )
+    monkeypatch.setattr("reviewer.pipeline.review_chat", healthy)
+    pipeline.review_merge_request(1, 1)
+    assert state["ledger"].outage_reported is False, "recovery clears the flag"
+
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult("", "error", 0, 0, 0.0),
+    )
+    # Fresh files, or the run would find nothing to do and stay silent for that
+    # reason instead of the one under test.
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs", lambda mr: [fd("later.py")],
+    )
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.notes) == 3, "the new outage earns its own report"
