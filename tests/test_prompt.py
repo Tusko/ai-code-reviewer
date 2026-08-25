@@ -66,7 +66,7 @@ def test_estimate_tokens_is_never_zero():
 def test_input_token_budget_leaves_room_for_output(monkeypatch):
     budget = input_token_budget()
     assert budget > 0
-    assert budget < config.REVIEW_CONTEXT_TOKENS
+    assert budget <= config.REVIEW_CONTEXT_TOKENS - config.REVIEW_MAX_OUTPUT_TOKENS
 
 
 def test_fits_rejects_oversized_prompt():
