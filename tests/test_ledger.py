@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from reviewer import ledger as ledger_mod
@@ -37,6 +39,63 @@ def test_parse_marker_raises_on_broken_json():
     body = f"<!-- {ledger_mod.MARKER_PREFIX} {{not json}} -->"
     with pytest.raises(LedgerUnavailable):
         ledger_mod.parse_marker(body)
+
+
+def test_parse_marker_raises_when_hunks_is_not_a_list():
+    payload = {"hunks": "not-a-list"}
+    body = f"<!-- {ledger_mod.MARKER_PREFIX} {json.dumps(payload)} -->"
+    with pytest.raises(LedgerUnavailable):
+        ledger_mod.parse_marker(body)
+
+
+def test_parse_marker_raises_when_hunks_contains_non_string():
+    payload = {"hunks": ["aa", 5]}
+    body = f"<!-- {ledger_mod.MARKER_PREFIX} {json.dumps(payload)} -->"
+    with pytest.raises(LedgerUnavailable):
+        ledger_mod.parse_marker(body)
+
+
+def test_parse_marker_raises_when_muted_is_a_string():
+    payload = {"muted": "false"}
+    body = f"<!-- {ledger_mod.MARKER_PREFIX} {json.dumps(payload)} -->"
+    with pytest.raises(LedgerUnavailable):
+        ledger_mod.parse_marker(body)
+
+
+def test_parse_marker_raises_when_posted_is_a_string():
+    payload = {"posted": "abc"}
+    body = f"<!-- {ledger_mod.MARKER_PREFIX} {json.dumps(payload)} -->"
+    with pytest.raises(LedgerUnavailable):
+        ledger_mod.parse_marker(body)
+
+
+def test_parse_marker_raises_when_posted_is_a_bool():
+    payload = {"posted": True}
+    body = f"<!-- {ledger_mod.MARKER_PREFIX} {json.dumps(payload)} -->"
+    with pytest.raises(LedgerUnavailable):
+        ledger_mod.parse_marker(body)
+
+
+def test_parse_marker_raises_when_head_is_a_number():
+    payload = {"head": 123}
+    body = f"<!-- {ledger_mod.MARKER_PREFIX} {json.dumps(payload)} -->"
+    with pytest.raises(LedgerUnavailable):
+        ledger_mod.parse_marker(body)
+
+
+def test_parse_marker_accepts_a_fully_valid_marker_unchanged():
+    original = Ledger(
+        head="abc1234", posted=7, muted=True, oversized=True, hunks=("aa", "bb"),
+    )
+    payload = {
+        "head": original.head,
+        "posted": original.posted,
+        "muted": original.muted,
+        "oversized": original.oversized,
+        "hunks": list(original.hunks),
+    }
+    body = f"<!-- {ledger_mod.MARKER_PREFIX} {json.dumps(payload)} -->"
+    assert ledger_mod.parse_marker(body) == original
 
 
 def test_record_is_idempotent():

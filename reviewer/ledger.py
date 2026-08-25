@@ -86,7 +86,16 @@ def to_marker(value: Ledger) -> str:
 
 
 def parse_marker(body: str) -> Ledger:
-    """Reads a ledger out of a note body. No marker means a fresh MR."""
+    """Reads a ledger out of a note body. No marker means a fresh MR.
+
+    Fields are type-checked explicitly rather than coerced. A field that is
+    merely absent still falls back to the Ledger default, but a field that is
+    PRESENT with the wrong shape raises LedgerUnavailable instead of being
+    silently coerced — a coerced wrong-type value (e.g. a `hunks` string
+    iterated into single characters, or `bool("false") == True`) can make a
+    corrupt marker look like a valid, empty ledger, which is exactly the
+    "re-review the whole MR" flood this module exists to prevent.
+    """
     match = MARKER_RE.search(body or "")
     if not match:
         return Ledger()
@@ -96,16 +105,44 @@ def parse_marker(body: str) -> Ledger:
         raise LedgerUnavailable(f"state marker is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise LedgerUnavailable("state marker is not a JSON object")
-    try:
-        return Ledger(
-            head=str(payload.get("head") or ""),
-            posted=int(payload.get("posted") or 0),
-            muted=bool(payload.get("muted")),
-            oversized=bool(payload.get("oversized")),
-            hunks=tuple(str(key) for key in payload.get("hunks") or ()),
+
+    head = payload.get("head", "")
+    if not isinstance(head, str):
+        raise LedgerUnavailable(
+            f"state marker field 'head' must be a string, got {type(head).__name__}",
         )
-    except (TypeError, ValueError) as exc:
-        raise LedgerUnavailable(f"state marker has bad field types: {exc}") from exc
+
+    posted = payload.get("posted", 0)
+    if isinstance(posted, bool) or not isinstance(posted, int):
+        raise LedgerUnavailable(
+            f"state marker field 'posted' must be an int, got {type(posted).__name__}",
+        )
+
+    muted = payload.get("muted", False)
+    if not isinstance(muted, bool):
+        raise LedgerUnavailable(
+            f"state marker field 'muted' must be a bool, got {type(muted).__name__}",
+        )
+
+    oversized = payload.get("oversized", False)
+    if not isinstance(oversized, bool):
+        raise LedgerUnavailable(
+            f"state marker field 'oversized' must be a bool, got {type(oversized).__name__}",
+        )
+
+    hunks = payload.get("hunks", [])
+    if not isinstance(hunks, list) or not all(isinstance(key, str) for key in hunks):
+        raise LedgerUnavailable(
+            "state marker field 'hunks' must be a list of strings",
+        )
+
+    return Ledger(
+        head=head,
+        posted=posted,
+        muted=muted,
+        oversized=oversized,
+        hunks=tuple(hunks),
+    )
 
 
 def render_note(value: Ledger) -> str:
