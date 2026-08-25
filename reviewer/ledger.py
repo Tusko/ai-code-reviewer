@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Iterable
 
-from reviewer import config
+from reviewer import config, gitlab_client
 from reviewer.diff_parser import Hunk
 
 MARKER_PREFIX = "sidorovich-state:v1"
@@ -155,3 +155,40 @@ def render_note(value: Ledger) -> str:
         "_Цю нотатку я редагую, а не пишу заново. Не чіпай._\n\n"
         + to_marker(value)
     )
+
+
+class LedgerStore:
+    """Owns the GitLab state note. `Ledger` itself stays a pure value.
+
+    The note object is cached so a save is one API write, not a re-listing of
+    every note on the merge request.
+    """
+
+    def __init__(self, mr, note, value: Ledger) -> None:
+        self.mr = mr
+        self._note = note
+        self.ledger = value
+
+    @classmethod
+    def load(cls, mr) -> "LedgerStore":
+        try:
+            note = gitlab_client.find_note_with(mr, MARKER_PREFIX)
+        except LedgerUnavailable:
+            raise
+        except Exception as exc:
+            raise LedgerUnavailable(f"could not list MR notes: {exc}") from exc
+        if note is None:
+            return cls(mr, None, Ledger())
+        return cls(mr, note, parse_marker(getattr(note, "body", None) or ""))
+
+    def save(self) -> None:
+        """Writes the current value. Failures propagate.
+
+        A failed save means posted comments went unrecorded; continuing would
+        post them again on the next push, so the run must stop instead.
+        """
+        body = render_note(self.ledger)
+        if self._note is None:
+            self._note = gitlab_client.create_note(self.mr, body)
+        else:
+            gitlab_client.update_note(self._note, body)

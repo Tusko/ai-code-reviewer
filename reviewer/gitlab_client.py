@@ -135,6 +135,27 @@ def diff_fingerprint(project_id: int, mr_iid: int, file_diffs: Sequence[FileDiff
     return digest.hexdigest()
 
 
+def find_note_with(mr, marker: str):
+    """First note on the MR whose body contains `marker`, or None.
+
+    API failures propagate: the caller must be able to tell "no state yet" from
+    "could not read state".
+    """
+    for note in mr.notes.list(iterator=True):
+        if marker in (getattr(note, "body", None) or ""):
+            return note
+    return None
+
+
+def create_note(mr, body: str):
+    return mr.notes.create({"body": body})
+
+
+def update_note(note, body: str) -> None:
+    note.body = body
+    note.save()
+
+
 def commit_fingerprint(project_id: int, mr_iid: int, commits: Sequence[dict]) -> str:
     """Stable hash of project + MR identity and commit SHAs, used for dedupe."""
     digest = hashlib.sha256()

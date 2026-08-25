@@ -4,7 +4,7 @@ import pytest
 
 from reviewer import ledger as ledger_mod
 from reviewer.diff_parser import Hunk
-from reviewer.ledger import Ledger, LedgerUnavailable, hunk_key
+from reviewer.ledger import Ledger, LedgerStore, LedgerUnavailable, hunk_key
 
 
 def test_hunk_key_ignores_line_number_shift():
@@ -134,3 +134,71 @@ def test_render_note_is_human_readable():
     body = ledger_mod.render_note(Ledger(head="abc1234", posted=3))
     assert "Сідорович" in body
     assert "abc1234" in body
+
+
+class FakeNote:
+    def __init__(self, body=""):
+        self.body = body
+        self.saves = 0
+
+    def save(self):
+        self.saves += 1
+
+
+class FakeNotes:
+    def __init__(self, notes=(), raises=False):
+        self._notes = list(notes)
+        self._raises = raises
+        self.created = []
+
+    def list(self, iterator=False):
+        if self._raises:
+            raise RuntimeError("gitlab is down")
+        return list(self._notes)
+
+    def create(self, payload):
+        note = FakeNote(payload["body"])
+        self._notes.append(note)
+        self.created.append(payload["body"])
+        return note
+
+
+class FakeMR:
+    def __init__(self, notes=(), raises=False):
+        self.notes = FakeNotes(notes, raises)
+
+
+def test_store_load_fresh_when_no_marker():
+    store = LedgerStore.load(FakeMR([FakeNote("unrelated chatter")]))
+    assert store.ledger == Ledger()
+
+
+def test_store_load_reads_existing_marker():
+    body = ledger_mod.render_note(Ledger(head="abc1234", posted=4, hunks=("aa",)))
+    store = LedgerStore.load(FakeMR([FakeNote("noise"), FakeNote(body)]))
+    assert store.ledger.posted == 4
+    assert store.ledger.hunks == ("aa",)
+
+
+def test_store_load_raises_when_api_fails():
+    with pytest.raises(LedgerUnavailable):
+        LedgerStore.load(FakeMR(raises=True))
+
+
+def test_store_load_raises_on_broken_marker():
+    mr = FakeMR([FakeNote(f"<!-- {ledger_mod.MARKER_PREFIX} {{broken}} -->")])
+    with pytest.raises(LedgerUnavailable):
+        LedgerStore.load(mr)
+
+
+def test_store_save_creates_note_once_then_edits():
+    mr = FakeMR()
+    store = LedgerStore.load(mr)
+    store.ledger = store.ledger.spend(1)
+    store.save()
+    assert len(mr.notes.created) == 1
+
+    store.ledger = store.ledger.spend(1)
+    store.save()
+    assert len(mr.notes.created) == 1, "second save must edit, not post again"
+    assert ledger_mod.parse_marker(mr.notes._notes[0].body).posted == 2
