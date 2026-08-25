@@ -1,6 +1,6 @@
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
 
 from reviewer import (
@@ -9,7 +9,7 @@ from reviewer import (
 from reviewer.chat_types import FINDING_TAGS, LGTM_TEXT, ChatResult
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.filters import is_reviewable
-from reviewer.ledger import LedgerStore, LedgerUnavailable, hunk_key
+from reviewer.ledger import Ledger, LedgerStore, LedgerUnavailable, hunk_key
 from reviewer.memes import snark
 from reviewer.openrouter_client import review_chat
 from reviewer.queue import DedupeCache
@@ -86,6 +86,22 @@ def select_files(
             outcomes.append(FileOutcome(fd.new_path, "skipped", "over MAX_FILES limit"))
         kept = kept[: config.MAX_FILES]
     return kept, outcomes
+
+
+def drop_known_hunks(
+    file_diffs: Sequence[FileDiff], value: "Ledger",
+) -> list[FileDiff]:
+    """Returns the diffs with already-reviewed hunks removed.
+
+    A file whose every hunk is known disappears from the result entirely.
+    """
+    known = set(value.hunks)
+    fresh: list[FileDiff] = []
+    for fd in file_diffs:
+        hunks = tuple(h for h in fd.hunks if hunk_key(fd.new_path, h) not in known)
+        if hunks:
+            fresh.append(replace(fd, hunks=hunks))
+    return fresh
 
 
 # With a 262k-token review context essentially every file fits at L1, so the L2
@@ -365,25 +381,29 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             store.save()
             return
 
-        fingerprint = gitlab_client.diff_fingerprint(project_id, mr_iid, file_diffs)
-        if not force and dedupe.seen(fingerprint):
-            logging.info("MR !%s diff unchanged since last review; skipping", mr_iid)
+        fresh = drop_known_hunks(reviewable, store.ledger)
+        if not fresh:
+            # Every hunk has been reviewed already. Say nothing at all: this is
+            # what makes a container restart or a no-op push cost zero comments.
+            logging.info("MR !%s: no unreviewed hunks; staying silent", mr_iid)
+            store.ledger = store.ledger.at_head(head_sha)
+            store.save()
             return
 
-        kept, outcomes = select_files(reviewable, skipped)
+        kept, outcomes = select_files(fresh, skipped)
         voice = VoiceState()
-
-        if not kept:
-            logging.info("MR !%s: nothing reviewable", mr_iid)
-            gitlab_client.post_note(mr, render_summary(outcomes))
-            dedupe.remember(fingerprint)
-            return
+        review_state = ReviewState()
 
         for file_diff in kept:
             if time.monotonic() - started > config.MR_TIMEOUT_S:
                 outcomes.append(FileOutcome(
                     file_diff.new_path, "skipped",
                     f"MR deadline of {config.MR_TIMEOUT_S}s reached",
+                ))
+                continue
+            if not review_state.open:
+                outcomes.append(FileOutcome(
+                    file_diff.new_path, "skipped", "review backend rate limited",
                 ))
                 continue
 
@@ -398,13 +418,29 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                     )
 
             try:
-                outcomes.append(review_file(mr, file_diff, context, voice))
+                outcome = review_file(mr, file_diff, context, voice, review_state)
             except Exception as exc:
                 logging.error("Review failed for %s: %s", file_diff.new_path, exc)
                 outcomes.append(FileOutcome(file_diff.new_path, "error", str(exc)[:120]))
+                continue
+
+            outcomes.append(outcome)
+            if outcome.status in ("reviewed", "clean"):
+                # Only settled files are recorded. An errored or rate-limited
+                # file must be retried on the next push, so its hunks stay out.
+                store.ledger = store.ledger.record(
+                    hunk_key(file_diff.new_path, h) for h in file_diff.hunks
+                )
+            if outcome.status == "reviewed":
+                store.ledger = store.ledger.spend(1)
+            # Saved per file, not once at the end: a crash mid-run would
+            # otherwise leave comments posted but unrecorded, and the next push
+            # would post every one of them again.
+            store.save()
 
         gitlab_client.post_note(mr, render_summary(outcomes))
-        dedupe.remember(fingerprint)
+        store.ledger = store.ledger.spend(1).at_head(head_sha)
+        store.save()
         logging.info("MR !%s reviewed in %.1fs", mr_iid, time.monotonic() - started)
 
     except Exception as exc:

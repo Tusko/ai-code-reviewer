@@ -2,7 +2,8 @@ import pytest
 
 from reviewer import pipeline
 from reviewer.diff_parser import FileDiff, Hunk
-from reviewer.ledger import Ledger
+from reviewer.ledger import Ledger, hunk_key
+from reviewer.pipeline import drop_known_hunks
 
 
 def fd(path, added=1, hunks=None):
@@ -95,3 +96,57 @@ def test_oversized_mr_stays_silent_on_the_next_push(harness, monkeypatch):
     pipeline.review_merge_request(1, 1)
     pipeline.review_merge_request(1, 1)
     assert len(recorder.notes) == 1, "the oversized note must not repeat"
+
+
+def test_drop_known_hunks_removes_seen_hunks():
+    first = Hunk(1, 1, (" ctx", "+one"))
+    second = Hunk(9, 9, (" ctx", "+two"))
+    diff = fd("a.py", hunks=(first, second))
+    value = Ledger().record([hunk_key("a.py", first)])
+    fresh = drop_known_hunks([diff], value)
+    assert len(fresh) == 1
+    assert fresh[0].hunks == (second,)
+
+
+def test_drop_known_hunks_drops_fully_seen_files():
+    only = Hunk(1, 1, (" ctx", "+one"))
+    value = Ledger().record([hunk_key("a.py", only)])
+    assert drop_known_hunks([fd("a.py", hunks=(only,))], value) == []
+
+
+def test_drop_known_hunks_survives_a_rebase():
+    """Same content at a new line number must still count as seen."""
+    lines = (" ctx", "+one")
+    value = Ledger().record([hunk_key("a.py", Hunk(1, 1, lines))])
+    rebased = fd("a.py", hunks=(Hunk(400, 400, lines),))
+    assert drop_known_hunks([rebased], value) == []
+
+
+def test_unchanged_diff_posts_absolutely_nothing(harness, monkeypatch):
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    diff = fd("a.py")
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [diff])
+    state["ledger"] = Ledger().record(
+        [hunk_key("a.py", h) for h in diff.hunks]
+    )
+    pipeline.review_merge_request(1, 1)
+    assert recorder.notes == []
+    assert recorder.inline == []
+
+
+def test_reviewed_hunks_are_recorded(harness, monkeypatch):
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+        ),
+    )
+    diff = fd("a.py")
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [diff])
+    pipeline.review_merge_request(1, 1)
+    assert hunk_key("a.py", diff.hunks[0]) in state["ledger"].hunks
+    assert state["saves"] >= 2, "the ledger must be saved incrementally"
