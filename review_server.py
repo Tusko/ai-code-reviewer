@@ -2,7 +2,7 @@ import logging
 
 from flask import Flask, jsonify, request
 
-from reviewer import config
+from reviewer import config, gitlab_client
 from reviewer.pipeline import review_merge_request
 from reviewer.queue import start_worker
 
@@ -49,6 +49,19 @@ def should_review(event_type: str, data: dict) -> tuple[int, int, bool] | None:
         if attrs.get("noteable_type") != "MergeRequest":
             return None
         if "/review" not in (attrs.get("note") or "").lower():
+            return None
+        # The budget note ends with "кинь `/review`", and GitLab fires a Note
+        # Hook for notes the bot creates through the API. Without this check
+        # the hard stop re-triggers itself: force=True runs unmute_and_reset,
+        # which clears `muted` and zeroes `posted`, and the cap re-arms
+        # forever. Fail closed when authorship cannot be established.
+        bot = gitlab_client.bot_username()
+        if not bot:
+            logging.error("Ignoring /review: cannot tell whose comment this is")
+            return None
+        author = ((data.get("user") or {}).get("username") or "")
+        if author.lower() == bot.lower():
+            logging.info("Ignoring /review: it is Sidorovich's own comment")
             return None
         return data["project"]["id"], data["merge_request"]["iid"], True
 

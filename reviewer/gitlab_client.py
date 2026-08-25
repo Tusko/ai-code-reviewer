@@ -8,6 +8,7 @@ from reviewer import config
 from reviewer.diff_parser import FileDiff, Hunk, file_diff_from_change
 
 _client = None
+_bot_username = None
 
 
 def get_client():
@@ -17,6 +18,29 @@ def get_client():
     if _client is None:
         logging.warning("GITLAB_TOKEN not provided; GitLab calls will fail")
     return _client
+
+
+def bot_username() -> str:
+    """Returns the username GITLAB_TOKEN authenticates as, or "" if unknown.
+
+    Callers must read "" as *unknown*, never as *not the bot*: GitLab fires a
+    Note Hook for the bot's own comments, and Sidorovich's budget note tells
+    the human to type /review. Acting on a comment we cannot attribute would
+    let the bot clear its own mute and start the flood over.
+    """
+    global _bot_username
+    if config.SIDOROVICH_BOT_USERNAME:
+        return config.SIDOROVICH_BOT_USERNAME
+    if _bot_username is None:
+        client = get_client()
+        if client is not None:
+            try:
+                client.auth()
+                _bot_username = getattr(client.user, "username", "") or None
+            except Exception as exc:
+                # Left as None on purpose, so the next webhook tries again.
+                logging.error("Could not resolve the bot's own username: %s", exc)
+    return _bot_username or ""
 
 
 def fetch_mr(project_id: int, mr_iid: int):

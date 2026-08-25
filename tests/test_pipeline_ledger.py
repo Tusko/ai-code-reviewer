@@ -1,6 +1,8 @@
+import logging
+
 import pytest
 
-from reviewer import pipeline
+from reviewer import config, pipeline
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.ledger import Ledger, hunk_key
 from reviewer.pipeline import drop_known_hunks
@@ -210,6 +212,32 @@ def test_budget_exhaustion_posts_one_final_note_and_mutes(harness, monkeypatch):
     assert len(recorder.notes) == 1
     assert "ліміт" in recorder.notes[0].lower()
     assert state["ledger"].muted is True
+    # The 8 files the budget refused must stay unrecorded, or the /review that
+    # lifts the mute would find nothing fresh and their bugs would be lost.
+    assert len(state["ledger"].hunks) == 2
+    assert state["ledger"].posted == config.MR_COMMENT_BUDGET
+
+
+def test_the_summary_note_costs_a_slot(harness, monkeypatch):
+    """Every comment counts, the run summary included. If the summary were
+    free, a push per file would post an unbounded number of them."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.MR_COMMENT_BUDGET", 30)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult("[LGTM]", "stop", 0, 0, 0.0),
+    )
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs", lambda mr: [fd("a.py")],
+    )
+    pipeline.review_merge_request(1, 1)
+    assert len(recorder.inline) == 1
+    assert len(recorder.notes) == 1
+    assert state["ledger"].posted == 2, (
+        "one inline comment plus the run summary is two slots, not one"
+    )
 
 
 def test_muted_mr_ignores_a_plain_push(harness, monkeypatch):
@@ -238,7 +266,7 @@ def test_force_review_clears_mute_and_resets_budget(harness, monkeypatch):
     assert len(recorder.notes) == 1
 
 
-def test_unreadable_ledger_skips_the_run(harness, monkeypatch):
+def test_unreadable_ledger_skips_the_run(harness, monkeypatch, caplog):
     """Fail closed. An empty-ledger fallback would re-review the whole MR."""
     recorder, state = harness
     from reviewer.ledger import LedgerUnavailable
@@ -248,9 +276,14 @@ def test_unreadable_ledger_skips_the_run(harness, monkeypatch):
 
     monkeypatch.setattr("reviewer.pipeline.LedgerStore.load", staticmethod(_boom))
     monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [fd("a.py")])
-    pipeline.review_merge_request(1, 1)
+    with caplog.at_level(logging.ERROR):
+        pipeline.review_merge_request(1, 1)
     assert recorder.notes == []
     assert recorder.inline == []
+    # Silence alone proves nothing: an unhandled crash is silent too. The run
+    # must have recognised the failure and declined on purpose.
+    assert "review state unreadable" in caplog.text
+    assert "Critical error" not in caplog.text
 
 
 def test_rate_limited_files_are_not_recorded(harness, monkeypatch):

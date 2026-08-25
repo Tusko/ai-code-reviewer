@@ -2,6 +2,7 @@ import pytest
 
 import review_server
 from review_server import app, should_review
+from reviewer import gitlab_client
 
 
 @pytest.fixture
@@ -42,13 +43,39 @@ def test_merge_action_is_ignored():
     assert should_review("Merge Request Hook", _mr_hook("merge")) is None
 
 
-def test_review_comment_triggers_review():
-    data = {
+@pytest.fixture(autouse=True)
+def _known_bot(monkeypatch):
+    """should_review now needs to know which account is Sidorovich's."""
+    monkeypatch.setattr(gitlab_client, "bot_username", lambda: "sidorovich-bot")
+
+
+def _note_hook(note, author="human"):
+    return {
         "project": {"id": 3},
         "merge_request": {"iid": 7},
-        "object_attributes": {"noteable_type": "MergeRequest", "note": "please /review this"},
+        "user": {"username": author},
+        "object_attributes": {"noteable_type": "MergeRequest", "note": note},
     }
-    assert should_review("Note Hook", data) == (3, 7, True)
+
+
+def test_review_comment_triggers_review():
+    assert should_review("Note Hook", _note_hook("please /review this")) == (3, 7, True)
+
+
+def test_sidorovichs_own_review_mention_does_not_retrigger_him():
+    """The budget note says "кинь `/review`" and GitLab webhooks it back to us.
+
+    Obeying it would run unmute_and_reset, clearing the mute and zeroing the
+    comment counter — the hard stop would re-arm itself and never bind.
+    """
+    note = "**Ліміт вичерпано.** Далі мовчу. Кинь `/review` — лічильник обнулиться."
+    assert should_review("Note Hook", _note_hook(note, author="sidorovich-bot")) is None
+
+
+def test_review_is_ignored_when_authorship_is_unknown(monkeypatch):
+    """Fail closed: an unattributable /review might be the bot's own."""
+    monkeypatch.setattr(gitlab_client, "bot_username", lambda: "")
+    assert should_review("Note Hook", _note_hook("/review")) is None
 
 
 def test_unrelated_comment_is_ignored():

@@ -28,6 +28,10 @@ def env_bool(name: str, default: bool) -> bool:
 GITLAB_URL = os.environ.get("GITLAB_URL", "https://gitlab.com")
 GITLAB_TOKEN = os.environ.get("GITLAB_TOKEN")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
+# The account GITLAB_TOKEN belongs to. Only needed when the bot cannot ask
+# GitLab who it is (see gitlab_client.bot_username); it exists so that a
+# locked-down token cannot disable the /review command outright.
+SIDOROVICH_BOT_USERNAME = os.environ.get("SIDOROVICH_BOT_USERNAME", "")
 
 # Ollama
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://host.docker.internal:11434")
