@@ -114,6 +114,21 @@ class Ledger:
         known = set(self.retried)
         return all(key in known for key in keys)
 
+    def keep_only(self, live: set) -> "Ledger":
+        """Drops keys for hunks the diff no longer contains.
+
+        hunk_key is content-based and record only ever appends, so a
+        long-lived merge request accumulated a key for every hunk that ever
+        existed in it. LEDGER_MAX_HUNKS then stopped being a ceiling on how big
+        an MR may be and became a countdown on how old it may get: ten files of
+        five hunks reached 1450 keys in a hundred pushes on fifty live hunks.
+        Pruning to the current diff also gives saturation an exit.
+        """
+        hunks = tuple(k for k in self.hunks if k in live)
+        retried = tuple(k for k in self.retried if k in live)
+        saturated = self.saturated and len(hunks) >= config.LEDGER_MAX_HUNKS
+        return replace(self, hunks=hunks, retried=retried, saturated=saturated)
+
     def report_outage(self) -> "Ledger":
         """Marks that the human has been told the backend produced nothing."""
         return replace(self, outage_reported=True)
@@ -227,7 +242,15 @@ def parse_marker(body: str) -> Ledger:
 
 def render_note(value: Ledger) -> str:
     head = value.head or "—"
-    status = "заглушений" if value.muted else "активний"
+    if value.saturated:
+        # The one status the reader must not have to guess at: the bot is not
+        # quiet because there is nothing to say, it is quiet because it has
+        # lost track of what it has already said.
+        status = "переріс памʼять — не рев'ю"
+    elif value.muted:
+        status = "заглушений"
+    else:
+        status = "активний"
     return (
         "🔒 **Сідорович — стан рев'ю**\n\n"
         f"Коментарів: {value.posted}/{config.MR_COMMENT_BUDGET} · "

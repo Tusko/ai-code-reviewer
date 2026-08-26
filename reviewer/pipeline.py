@@ -250,8 +250,7 @@ def render_summary(outcomes: Sequence[FileOutcome]) -> str:
         lines.append(f"\n**Findings on {len(delivered)} file(s):** "
                      + ", ".join(f"`{o.path}`" for o in delivered))
     if undelivered:
-        lines.append("\n**Findings that could not be posted "
-                     "(retried on the next push):**")
+        lines.append("\n**Findings that could not be posted:**")
         lines.extend(f"- `{o.path}` — {o.detail}" for o in undelivered)
     if clean and not reviewed and not errored:
         lines.append("\nLGTM. No logic or security issues found in the changed lines.")
@@ -399,6 +398,26 @@ def _save_quietly(store, mr_iid: int) -> bool:
         return False
 
 
+def render_saturated(tracked: int) -> str:
+    """Said once, when the ledger stops being able to track this MR.
+
+    Going quiet is the right failure; going quiet without saying so is not.
+    Before this the bot answered /review with "I have seen everything, push
+    something new" while blind to brand new files.
+    """
+    lines = []
+    if config.SNARK:
+        lines.append(f"_{snark()}_\n")
+    lines.append(
+        f"**Цей MR переріс мою памʼять: {tracked} хунків.**\n"
+    )
+    lines.append(
+        "Я більше не можу відрізнити переглянуте від нового, тому далі мовчу. "
+        "Поділи MR на менші — інакше я тут марний.\n"
+    )
+    return "\n".join(lines)
+
+
 def render_nothing_to_do(reason: str) -> str:
     """Answers a manual /review that found no work. Silence reads as a crash."""
     lines = []
@@ -540,6 +559,13 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             _save_quietly(store, mr_iid)
             return
 
+        # Against every file in the diff, not just the reviewable ones: a file
+        # that turned non-reviewable this push must not lose its record.
+        store.ledger = store.ledger.keep_only({
+            hunk_key(fd.new_path, h) for fd in file_diffs for h in fd.hunks
+        })
+        was_saturated = store.ledger.saturated
+
         fresh = drop_known_hunks(reviewable, store.ledger)
         if not fresh:
             # Every hunk has been reviewed already. Say nothing at all: this is
@@ -549,7 +575,10 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 # render_budget_exhausted() tells the human to type /review.
                 # Answering that with nothing at all reads as a dead bot.
                 gitlab_client.post_note(mr, render_nothing_to_do(
-                    "Усе в цьому MR я вже дивився. Запуш щось нове."))
+                    "Цей MR переріс мою памʼять, я вже нічого тут не бачу. "
+                    "Поділи його."
+                    if store.ledger.saturated
+                    else "Усе в цьому MR я вже дивився. Запуш щось нове."))
                 return
             store.ledger = store.ledger.at_head(head_sha)
             _save_quietly(store, mr_iid)
@@ -642,6 +671,16 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             if outcome.status != "reviewed":
                 store.ledger = store.ledger.refund()
             _save_quietly(store, mr_iid)
+
+        if store.ledger.saturated and not was_saturated:
+            if _charge(store, mr_iid, head=head_sha):
+                gitlab_client.post_note(
+                    mr, render_saturated(len(store.ledger.hunks)),
+                )
+            logging.error(
+                "MR !%s saturated the ledger at LEDGER_MAX_HUNKS=%s",
+                mr_iid, config.LEDGER_MAX_HUNKS,
+            )
 
         settled = any(o.status in ("reviewed", "clean") for o in outcomes)
         if settled and store.ledger.outage_reported:

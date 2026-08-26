@@ -750,35 +750,44 @@ def _always_fails_to_post(monkeypatch, recorder):
 def test_a_saturated_ledger_does_not_replay_the_merge_request(harness, monkeypatch):
     """Past LEDGER_MAX_HUNKS the ledger evicted its oldest keys — precisely the
     ones select_files reaches first — so every /review posted a fresh full
-    round. Twenty-one of them reached six hundred comments."""
+    round. Twenty-one of them reached six hundred comments.
+
+    review_file is deliberately NOT stubbed: it is the only caller of
+    post_inline, so stubbing it made the headline assertion unable to fail.
+    """
     recorder, state = harness
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
     monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
     monkeypatch.setattr(
-        "reviewer.pipeline.review_file",
-        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
-            file_diff.new_path, "clean", "",
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
         ),
     )
+    files = 10
     monkeypatch.setattr(
         "reviewer.gitlab_client.fetch_file_diffs",
-        lambda mr: [fd(f"f{i}.py") for i in range(10)],
+        lambda mr: [fd(f"f{i}.py") for i in range(files)],
     )
-    commands = 21
+
+    pipeline.review_merge_request(1, 1)
+    first_round = len(recorder.inline)
+    assert first_round == files, "the first pass reviews everything once"
+    assert state["ledger"].saturated is True
+
+    commands = 20
     for _ in range(commands):
         pipeline.review_merge_request(1, 1, force=True)
 
-    assert state["ledger"].saturated is True
-    # One answer per command is the /review contract. What must never happen is
-    # a fresh round of file comments per command, which is what eviction bought
-    # and what reached six hundred. The budget is not what stops it here: the
-    # run never gets far enough to spend one.
-    assert len(recorder.inline) == 0
-    assert len(recorder.notes) <= commands + 1, (
-        f"{len(recorder.notes)} notes from {commands} /review commands"
+    assert len(recorder.inline) == first_round, (
+        f"{len(recorder.inline)} comments after {commands} /review commands; "
+        f"eviction would have posted {first_round * (commands + 1)}"
     )
-    for note in recorder.notes[1:]:
-        assert "Нема чого дивитись" in note
+    assert any("переріс" in n for n in recorder.notes), (
+        "going blind silently is what made this undiagnosable"
+    )
+
 
 
 def test_the_budget_note_still_names_undelivered_on_a_second_review(
@@ -837,3 +846,104 @@ def test_an_outage_that_raises_costs_nothing_either(harness, monkeypatch):
         f"{state['saves'] / 40} saves per push: the refund is not persisted "
         f"per file"
     )
+
+
+def test_a_long_lived_mr_does_not_go_blind_on_dead_keys(harness, monkeypatch):
+    """Ten files of five hunks reached 1450 recorded keys in a hundred pushes
+    while never exceeding fifty live hunks. The cap has to bound MR size, not
+    MR age."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 40)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_file",
+        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+            file_diff.new_path, "clean", "",
+        ),
+    )
+    rev = {"n": 0}
+
+    def _diffs(mr):
+        # The same ten files, rewritten every push: new content, new keys, the
+        # old ones gone from the diff for good.
+        rev["n"] += 1
+        return [
+            fd(f"f{i}.py", hunks=(Hunk(1, 1, (" ctx", f"+r{rev['n']}f{i}")),))
+            for i in range(10)
+        ]
+
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", _diffs)
+
+    for _ in range(100):
+        pipeline.review_merge_request(1, 1)
+
+    assert len(state["ledger"].hunks) <= 10, (
+        f"{len(state['ledger'].hunks)} keys for ten live hunks"
+    )
+    assert state["ledger"].saturated is False, "a rewritten MR must not go blind"
+
+
+def test_saturation_is_announced_exactly_once(harness, monkeypatch):
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_file",
+        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+            file_diff.new_path, "clean", "",
+        ),
+    )
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(10)],
+    )
+    for _ in range(15):
+        pipeline.review_merge_request(1, 1)
+
+    announcements = [n for n in recorder.notes if "переріс" in n]
+    assert len(announcements) == 1, (
+        f"{len(announcements)} announcements; it must be said once, not per push"
+    )
+    assert str(len(state["ledger"].hunks)) in announcements[0]
+
+
+def test_review_on_a_saturated_mr_does_not_claim_it_saw_everything(
+    harness, monkeypatch,
+):
+    """It answered "I have seen everything, push something new" while blind to
+    brand new files — false, and it prescribes the one action that cannot help."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_file",
+        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+            file_diff.new_path, "clean", "",
+        ),
+    )
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(10)],
+    )
+    pipeline.review_merge_request(1, 1)
+    recorder.notes.clear()
+    pipeline.review_merge_request(1, 1, force=True)
+
+    assert len(recorder.notes) == 1
+    assert "Запуш щось нове" not in recorder.notes[0]
+    assert "переріс" in recorder.notes[0]
+
+
+def test_the_state_note_says_when_the_bot_has_gone_blind():
+    from reviewer.ledger import render_note
+    assert "переріс" in render_note(Ledger(saturated=True))
+    assert "активний" in render_note(Ledger())
+    assert "заглушений" in render_note(Ledger(muted=True))
+
+
+def test_the_summary_does_not_promise_a_retry_it_will_not_make():
+    note = pipeline.render_summary([
+        pipeline.FileOutcome("a.py", "reviewed", "could not be posted", False),
+    ])
+    assert "could not be posted" in note
+    assert "retried on the next push" not in note

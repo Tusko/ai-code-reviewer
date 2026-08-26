@@ -255,3 +255,44 @@ def test_already_retried_needs_every_hunk_of_the_file():
     assert value.already_retried(["a"]) is True
     assert value.already_retried(["a", "b"]) is False
     assert value.already_retried(["b"]) is False
+
+
+def test_mark_retried_saturates_too(monkeypatch):
+    """Both lists share the cap; only record() setting the flag would leave
+    half the feature unguarded."""
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 2)
+    value = Ledger().mark_retried(["a", "b", "c"])
+    assert value.retried == ("a", "b")
+    assert value.saturated is True
+
+
+def test_saturated_fails_closed_on_a_wrong_shape():
+    for payload in ('{"saturated": "yes"}', '{"saturated": 1}',
+                    '{"saturated": null}', '{"saturated": []}'):
+        with pytest.raises(LedgerUnavailable):
+            parse_marker(f"<!-- sidorovich-state:v1 {payload} -->")
+
+
+def test_keep_only_drops_keys_the_diff_no_longer_has():
+    """hunk_key is content-based and record only appends, so a long-lived MR
+    accumulated a key for every hunk that ever existed in it. The cap stopped
+    being a ceiling on size and became a countdown on age."""
+    value = Ledger().record(["a", "b", "c"]).mark_retried(["b", "c"])
+    pruned = value.keep_only({"a", "b"})
+    assert pruned.hunks == ("a", "b")
+    assert pruned.retried == ("b",)
+
+
+def test_pruning_below_the_cap_lifts_saturation(monkeypatch):
+    """Otherwise the first oversized push blinds the MR for ever, even after
+    the author splits it back down."""
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 3)
+    value = Ledger().record(["a", "b", "c", "d"])
+    assert value.saturated is True
+    assert value.keep_only({"a", "b"}).saturated is False
+
+
+def test_pruning_that_stays_above_the_cap_keeps_saturation(monkeypatch):
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 2)
+    value = Ledger().record(["a", "b", "c"])
+    assert value.keep_only({"a", "b"}).saturated is True
