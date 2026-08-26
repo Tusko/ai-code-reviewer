@@ -95,7 +95,7 @@ def flavor_review(text: str, voice: "VoiceState | None" = None) -> str:
         return keep_dry(result.done_reason)
     if not preserves_findings(text, flavored):
         return keep_dry("rewrite changed findings")
-    if prompt_mod.looks_too_russian(flavored):
+    if prompt_mod.unusable_language(flavored):
         return keep_dry("still Russian after retry")
 
     if voice is not None:
@@ -110,9 +110,9 @@ def prefer_ukrainian(result: ChatResult, retry) -> ChatResult:
     model as an assistant turn; scolding a model that cannot see what it wrote
     mostly reproduces the same mistake.
     """
-    if result.failed or not prompt_mod.looks_too_russian(result.text):
+    if result.failed or not prompt_mod.unusable_language(result.text):
         return result
-    logging.warning("Sidorovich wrote Russian; retrying in Ukrainian")
+    logging.warning("Sidorovich broke the language rule; retrying")
     retried = retry(result.text)
     if retried.failed or not (retried.text or "").strip():
         return result

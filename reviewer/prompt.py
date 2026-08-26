@@ -1,5 +1,6 @@
 import logging
 import re
+import unicodedata
 from typing import Sequence
 
 from reviewer import config
@@ -43,20 +44,53 @@ SIDOROVICH_LANGUAGE = """МОВА (порушив — провалив зада�
 """
 
 SIDOROVICH_UKRAINIAN_RETRY = (
-    "Ти відповів російською. Це провал. Перепиши ТОЙ САМИЙ зміст українським "
-    "суржиком: цей/ця/це, висер, спросу, репозиторій. Не этот, не высер, не спроса."
+    "Ти зіпсував мову: або з'їхав у російську, або вкинув літери з чужої "
+    "абетки. Перепиши ТОЙ САМИЙ зміст українським суржиком: цей/ця/це, висер, "
+    "спросу, репозиторій. Не этот, не высер, не спроса. Тільки кирилиця й "
+    "латиниця — жодних інших абеток."
 )
 
 # Function words that are Russian, not Ukrainian surzhyk.
 RUSSIAN_TELLS_RE = re.compile(
     r"\b(этот|эта|это|эти|который|которая|которое|которые|которых|"
     r"высер|спроса|недоделанный|недоделанная|можно|нужно|если|только|"
-    r"почему|репозиторий)\b",
+    r"почему|репозиторий|"
+    # Seen in shipped roasts, all waved through by the list above: "різати
+    # глаза", "все развалиться", "оптимизація автотестів", "дебильний дефіс",
+    # and a bare "и" where Ukrainian wants "і"/"й".
+    r"глаз|глаза|глазах|развалит\w*|развалят\w*|оптимиз\w*|дебильн\w*|и)\b",
     re.IGNORECASE,
 )
 
+# Letters from a script that is neither Latin nor Cyrillic. Real roasts have
+# come back with "هاي ця фігня" and "наፈላли повідомлень" — the model dropping a
+# token from another alphabet mid-word. Only LETTERS count: emoji, box drawing
+# and punctuation are category S/P and must stay legal, since findings are
+# rendered with 📄 and 🔴.
+def _is_foreign_letter(ch: str) -> bool:
+    if not ch.isalpha():
+        return False
+    name = unicodedata.name(ch, "")
+    return not name.startswith(("LATIN", "CYRILLIC", "GREEK"))
+
 
 FENCE_RE = re.compile(r"```[\s\S]*?```")
+
+
+def has_foreign_script(text: str) -> bool:
+    """True when the reply contains letters from a third alphabet.
+
+    Fenced code is stripped first: a *Fix:* block may legitimately quote a
+    string in any language, and rejecting the rewrite for that would lose the
+    finding's code.
+    """
+    prose = FENCE_RE.sub(" ", text or "")
+    return any(_is_foreign_letter(ch) for ch in prose)
+
+
+def unusable_language(text: str) -> bool:
+    """True when a reply must be thrown back at the model."""
+    return looks_too_russian(text) or has_foreign_script(text)
 
 
 def looks_too_russian(text: str) -> bool:

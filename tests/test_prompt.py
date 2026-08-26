@@ -8,7 +8,8 @@ from reviewer.prompt import (
     SYSTEM_PROMPT, SIDOROVICH_SYSTEM_PROMPT, SIDOROVICH_REVIEW_VOICE_PROMPT,
     build_commit_summary_prompt,
     build_file_prompt, estimate_tokens, extract_ticket_key, fits,
-    input_token_budget, looks_too_russian, render_hunk,
+    has_foreign_script, input_token_budget, looks_too_russian,
+    render_hunk, unusable_language,
 )
 
 HUNK = Hunk(
@@ -234,3 +235,45 @@ def test_opener_and_closer_rotate_independently():
     assert len(pairs) > len(sidorovich_openers) * 3, (
         f"only {len(pairs)} distinct opener/closer pairs"
     )
+
+
+def test_looks_too_russian_catches_the_words_real_roasts_shipped():
+    """Every one of these went out to a merge request unchallenged."""
+    for bad in ("тепер хоч не буде різати глаза",
+                "якщо це все развалиться на проді",
+                "намагаються оптимизувати автотести",
+                "випихали цей дебильний дефіс",
+                "хоч це и так хуйня"):
+        assert looks_too_russian(bad), bad
+
+
+def test_looks_too_russian_still_allows_the_surzhyk_it_is_meant_to_keep():
+    for good in ("Опять цей недолугий висер закинули без спросу",
+                 "накодили якоїсь хуйні в авторизації",
+                 "оптимізація автотестів"):
+        assert not looks_too_russian(good), good
+
+
+def test_has_foreign_script_catches_the_alphabet_leaks():
+    """Both of these reached a real merge request."""
+    assert has_foreign_script("MONO-1532: هاي ця фігня з лоуеркейсом")
+    assert has_foreign_script("MONO-1536: наፈላли повідомлень про домени")
+
+
+def test_has_foreign_script_leaves_emoji_and_latin_alone():
+    assert not has_foreign_script("### 📄 `a.py`\n\n**🔴 [BLOCKER]** boom")
+    assert not has_foreign_script("Ну шо, TypeScript вам не поміг — 200 OK і все.")
+
+
+def test_has_foreign_script_ignores_fenced_code():
+    """A *Fix:* block may legitimately quote a string in any language, and
+    losing the finding's code over it is worse than the leak."""
+    assert not has_foreign_script(
+        'Полагодь це:\n```python\nGREETING = "مرحبا"\n```\nІ не пхай більше.'
+    )
+
+
+def test_unusable_language_covers_both_failure_modes():
+    assert unusable_language("это провал")
+    assert unusable_language("наፈላли")
+    assert not unusable_language("накодили якоїсь хуйні")

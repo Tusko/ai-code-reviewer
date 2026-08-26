@@ -120,7 +120,7 @@ def test_sidorovich_summary_retries_when_russian(monkeypatch):
 
     pipeline.review_merge_request(1, 1)
     assert notes == ["Опять цей недолугий висер у репозиторій закинули без спросу."]
-    assert "російською" in users[1]
+    assert "російську" in users[1]
 
 
 def test_sidorovich_summary_is_deduped_until_commits_change(monkeypatch):
