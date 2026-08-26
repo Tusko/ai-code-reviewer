@@ -886,9 +886,11 @@ def test_a_long_lived_mr_does_not_go_blind_on_dead_keys(harness, monkeypatch):
         pipeline.review_merge_request(1, 1)
 
     assert rev["n"] == 100, "every push must actually reach the diff"
-    assert len(state["ledger"].hunks) <= config.LEDGER_MAX_HUNKS, (
-        f"{len(state['ledger'].hunks)} keys for ten live hunks"
-    )
+    # A hundred pushes of ten files would accumulate a thousand keys without
+    # collection. The load-bearing assertion is `saturated is False`: reaching
+    # the cap is what sets it, so staying unsaturated proves dead keys are
+    # being collected rather than merely truncated away.
+    assert len(state["ledger"].hunks) <= config.LEDGER_MAX_HUNKS
     assert state["ledger"].saturated is False, "a rewritten MR must not go blind"
 
 
@@ -930,6 +932,70 @@ def test_saturation_is_announced_once_per_transition(harness, monkeypatch):
     announcements = [n for n in recorder.notes if "переріс" in n]
     assert len(announcements) == transitions, (
         f"{len(announcements)} announcements for {transitions} transitions"
+    )
+    # The MR's own size, not the truncated ledger count: the note used to read
+    # "outgrew my memory: 4 hunks" on a merge request of thousands.
+    assert "10 хунків" in announcements[0]
+    assert "4" in announcements[0], "and what it can actually hold"
+
+
+def test_the_saturation_note_is_charged_like_any_other_comment(harness, monkeypatch):
+    """An uncharged post is the class of defect this whole branch exists to
+    prevent — the release path started exactly there."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_file",
+        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+            file_diff.new_path, "clean", "",
+        ),
+    )
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(10)],
+    )
+    pipeline.review_merge_request(1, 1)
+    assert any("переріс" in n for n in recorder.notes)
+    # One for the saturation note, one for the run summary.
+    assert state["ledger"].posted == 2
+
+
+def test_a_split_up_mr_starts_reviewing_again(harness, monkeypatch):
+    """The recovery the saturation note promises. Pruning has to run before
+    drop_known_hunks, or the MR stays blind for one more push than it should."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+        ),
+    )
+    wide = {"on": True}
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(10 if wide["on"] else 2)],
+    )
+    pipeline.review_merge_request(1, 1)
+    assert state["ledger"].saturated is True
+
+    # The author splits the MR down, as the note told them to, and the split
+    # brings fresh files. Pruning has to happen before drop_known_hunks reads
+    # the ledger, or the block lifts a push later than it should and this work
+    # waits a whole round for nothing.
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd("split_a.py"), fd("split_b.py")],
+    )
+    pipeline.review_merge_request(1, 1)
+
+    assert state["ledger"].saturated is False, "splitting it must lift the block"
+    reviewed = {p for p, _ in recorder.inline}
+    assert {"split_a.py", "split_b.py"} <= reviewed, (
+        "the split work must be reviewed on that very push, not the next one"
     )
 
 
@@ -1010,17 +1076,6 @@ def test_a_rebase_that_drops_a_file_does_not_repost_its_findings(harness, monkey
         f"b.py commented {len(on_b)} times after ten rebase flaps"
     )
 
-
-def test_pruning_uses_the_whole_diff_not_just_the_reviewable_part(monkeypatch):
-    """A file that turns non-reviewable for a push — generated, vendored,
-    briefly binary — must not lose its record and come back for re-review."""
-    from reviewer.ledger import Ledger as L
-    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 2)
-    keep = L().record(["a", "b"])
-    assert keep.keep_only({"a", "b"}).hunks == ("a", "b")
-    assert keep.keep_only({"a"}).hunks == ("a",), (
-        "pruning against the reviewable subset alone would drop 'b' here"
-    )
 
 
 def test_a_file_that_turns_binary_keeps_its_record(harness, monkeypatch):

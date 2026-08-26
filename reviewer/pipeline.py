@@ -398,7 +398,7 @@ def _save_quietly(store, mr_iid: int) -> bool:
         return False
 
 
-def render_saturated(tracked: int) -> str:
+def render_saturated(live: int) -> str:
     """Said once per transition into saturation, not once per push.
 
     Going quiet is the right failure; going quiet without saying so is not.
@@ -409,7 +409,8 @@ def render_saturated(tracked: int) -> str:
     if config.SNARK:
         lines.append(f"_{snark()}_\n")
     lines.append(
-        f"**Цей MR переріс мою памʼять: {tracked} хунків.**\n"
+        f"**Цей MR переріс мою памʼять: {live} хунків, а я тримаю "
+        f"{config.LEDGER_MAX_HUNKS}.**\n"
     )
     lines.append(
         "Я більше не можу відрізнити переглянуте від нового, тому далі мовчу. "
@@ -676,9 +677,9 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
             # ledger that was already saturated returns above, at `not fresh`,
             # because drop_known_hunks reports nothing new for it.
             if _charge(store, mr_iid, head=head_sha):
-                gitlab_client.post_note(
-                    mr, render_saturated(len(store.ledger.hunks)),
-                )
+                gitlab_client.post_note(mr, render_saturated(
+                    sum(len(fd.hunks) for fd in file_diffs),
+                ))
             logging.error(
                 "MR !%s saturated the ledger at LEDGER_MAX_HUNKS=%s",
                 mr_iid, config.LEDGER_MAX_HUNKS,

@@ -305,3 +305,22 @@ def test_pruning_that_stays_above_the_cap_keeps_saturation(monkeypatch):
     monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 2)
     value = Ledger().record(["a", "b", "c"])
     assert value.keep_only({"a", "b"}).saturated is True
+
+
+def test_pressure_counts_both_lists(monkeypatch):
+    """mark_retried saturates from len(retried), so a guard that weighs only
+    hunks lets a merge request whose posts keep failing starve collection and
+    go blind on retry keys alone."""
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
+    value = Ledger().record(["live"]).mark_retried(["d1", "d2", "d3"])
+    assert value.keep_only({"live"}) != value, "collection must run under pressure"
+    assert value.keep_only({"live"}).retried == ()
+
+
+def test_a_saturated_ledger_always_collects(monkeypatch):
+    """Without this clause a single blind push becomes a permanently dead
+    merge request: collection never runs again, so saturation never lifts."""
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 100)
+    stuck = Ledger(hunks=("a", "b"), saturated=True)
+    assert stuck.keep_only({"a"}).hunks == ("a",)
+    assert stuck.keep_only({"a"}).saturated is False, "it has to be able to recover"
