@@ -273,14 +273,23 @@ def test_saturated_fails_closed_on_a_wrong_shape():
             parse_marker(f"<!-- sidorovich-state:v1 {payload} -->")
 
 
-def test_keep_only_drops_keys_the_diff_no_longer_has():
+def test_keep_only_collects_dead_keys_under_pressure(monkeypatch):
     """hunk_key is content-based and record only appends, so a long-lived MR
     accumulated a key for every hunk that ever existed in it. The cap stopped
     being a ceiling on size and became a countdown on age."""
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 3)
     value = Ledger().record(["a", "b", "c"]).mark_retried(["b", "c"])
     pruned = value.keep_only({"a", "b"})
     assert pruned.hunks == ("a", "b")
     assert pruned.retried == ("b",)
+
+
+def test_keep_only_forgets_nothing_while_there_is_room(monkeypatch):
+    """A rebase drops a file for one push. Forgetting it then made every
+    finding in that file post again on the next push."""
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 100)
+    value = Ledger().record(["a", "b", "c"])
+    assert value.keep_only({"a"}) == value, "absent once is not never seen"
 
 
 def test_pruning_below_the_cap_lifts_saturation(monkeypatch):

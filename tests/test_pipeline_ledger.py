@@ -3,6 +3,8 @@ import logging
 import pytest
 
 from reviewer import config, pipeline
+from dataclasses import replace
+
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.ledger import Ledger, hunk_key, parse_marker, render_note
 from reviewer.pipeline import drop_known_hunks
@@ -851,9 +853,15 @@ def test_an_outage_that_raises_costs_nothing_either(harness, monkeypatch):
 def test_a_long_lived_mr_does_not_go_blind_on_dead_keys(harness, monkeypatch):
     """Ten files of five hunks reached 1450 recorded keys in a hundred pushes
     while never exceeding fifty live hunks. The cap has to bound MR size, not
-    MR age."""
+    MR age.
+
+    The budget is raised on purpose: at the default the MR mutes at push 30 and
+    the remaining seventy pushes never reach fetch_file_diffs at all, leaving
+    the assertion to run against an empty ledger on a dead merge request.
+    """
     recorder, state = harness
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.MR_COMMENT_BUDGET", 10_000)
     monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 40)
     monkeypatch.setattr(
         "reviewer.pipeline.review_file",
@@ -877,15 +885,22 @@ def test_a_long_lived_mr_does_not_go_blind_on_dead_keys(harness, monkeypatch):
     for _ in range(100):
         pipeline.review_merge_request(1, 1)
 
-    assert len(state["ledger"].hunks) <= 10, (
+    assert rev["n"] == 100, "every push must actually reach the diff"
+    assert len(state["ledger"].hunks) <= config.LEDGER_MAX_HUNKS, (
         f"{len(state['ledger'].hunks)} keys for ten live hunks"
     )
     assert state["ledger"].saturated is False, "a rewritten MR must not go blind"
 
 
-def test_saturation_is_announced_exactly_once(harness, monkeypatch):
+
+def test_saturation_is_announced_once_per_transition(harness, monkeypatch):
+    """Static content returns early before the announcement is even reached,
+    so a static test cannot tell the guard from the early return. This one
+    oscillates in and out of saturation and counts the transitions.
+    """
     recorder, state = harness
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.MR_COMMENT_BUDGET", 10_000)
     monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
     monkeypatch.setattr(
         "reviewer.pipeline.review_file",
@@ -893,18 +908,30 @@ def test_saturation_is_announced_exactly_once(harness, monkeypatch):
             file_diff.new_path, "clean", "",
         ),
     )
-    monkeypatch.setattr(
-        "reviewer.gitlab_client.fetch_file_diffs",
-        lambda mr: [fd(f"f{i}.py") for i in range(10)],
-    )
-    for _ in range(15):
+    rev, wide = {"n": 0}, {"on": True}
+
+    def _diffs(mr):
+        rev["n"] += 1
+        count = 10 if wide["on"] else 2
+        return [
+            fd(f"f{i}.py", hunks=(Hunk(1, 1, (" ctx", f"+r{rev['n']}f{i}")),))
+            for i in range(count)
+        ]
+
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", _diffs)
+
+    transitions = 3
+    for _ in range(transitions):
+        wide["on"] = True
+        pipeline.review_merge_request(1, 1)
+        wide["on"] = False
         pipeline.review_merge_request(1, 1)
 
     announcements = [n for n in recorder.notes if "переріс" in n]
-    assert len(announcements) == 1, (
-        f"{len(announcements)} announcements; it must be said once, not per push"
+    assert len(announcements) == transitions, (
+        f"{len(announcements)} announcements for {transitions} transitions"
     )
-    assert str(len(state["ledger"].hunks)) in announcements[0]
+
 
 
 def test_review_on_a_saturated_mr_does_not_claim_it_saw_everything(
@@ -947,3 +974,84 @@ def test_the_summary_does_not_promise_a_retry_it_will_not_make():
     ])
     assert "could not be posted" in note
     assert "retried on the next push" not in note
+
+
+def test_a_rebase_that_drops_a_file_does_not_repost_its_findings(harness, monkeypatch):
+    """A rebase onto a main that already carries some of your commits drops a
+    file for a single push. Forgetting its keys then made every finding in it
+    post again — measured at ten re-posts for a file that flapped ten times."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+        ),
+    )
+    present = {"on": True}
+
+    def _diffs(mr):
+        files = [fd("a.py")]
+        if present["on"]:
+            files.append(fd("b.py"))
+        return files
+
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", _diffs)
+
+    for _ in range(10):
+        present["on"] = False
+        pipeline.review_merge_request(1, 1)
+        present["on"] = True
+        pipeline.review_merge_request(1, 1)
+
+    on_b = [c for c in recorder.inline if c[0] == "b.py"]
+    assert len(on_b) == 1, (
+        f"b.py commented {len(on_b)} times after ten rebase flaps"
+    )
+
+
+def test_pruning_uses_the_whole_diff_not_just_the_reviewable_part(monkeypatch):
+    """A file that turns non-reviewable for a push — generated, vendored,
+    briefly binary — must not lose its record and come back for re-review."""
+    from reviewer.ledger import Ledger as L
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 2)
+    keep = L().record(["a", "b"])
+    assert keep.keep_only({"a", "b"}).hunks == ("a", "b")
+    assert keep.keep_only({"a"}).hunks == ("a",), (
+        "pruning against the reviewable subset alone would drop 'b' here"
+    )
+
+
+def test_a_file_that_turns_binary_keeps_its_record(harness, monkeypatch):
+    """Pruning runs against every file in the diff, not only the reviewable
+    ones. A file that is briefly generated, vendored or binary would otherwise
+    lose its keys under pressure and be reviewed again when it came back."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 2)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+        ),
+    )
+    binary = {"on": False}
+
+    def _diffs(mr):
+        b = fd("b.py")
+        if binary["on"]:
+            b = replace(b, is_binary=True)
+        return [fd("a.py"), b]
+
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", _diffs)
+
+    for _ in range(10):
+        binary["on"] = True
+        pipeline.review_merge_request(1, 1)
+        binary["on"] = False
+        pipeline.review_merge_request(1, 1)
+
+    on_b = [c for c in recorder.inline if c[0] == "b.py"]
+    assert len(on_b) == 1, f"b.py commented {len(on_b)} times"

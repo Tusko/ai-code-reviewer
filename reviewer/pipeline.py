@@ -399,7 +399,7 @@ def _save_quietly(store, mr_iid: int) -> bool:
 
 
 def render_saturated(tracked: int) -> str:
-    """Said once, when the ledger stops being able to track this MR.
+    """Said once per transition into saturation, not once per push.
 
     Going quiet is the right failure; going quiet without saying so is not.
     Before this the bot answered /review with "I have seen everything, push
@@ -564,7 +564,6 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
         store.ledger = store.ledger.keep_only({
             hunk_key(fd.new_path, h) for fd in file_diffs for h in fd.hunks
         })
-        was_saturated = store.ledger.saturated
 
         fresh = drop_known_hunks(reviewable, store.ledger)
         if not fresh:
@@ -672,7 +671,10 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 store.ledger = store.ledger.refund()
             _save_quietly(store, mr_iid)
 
-        if store.ledger.saturated and not was_saturated:
+        if store.ledger.saturated:
+            # Reached at most once per transition without needing a guard: a
+            # ledger that was already saturated returns above, at `not fresh`,
+            # because drop_known_hunks reports nothing new for it.
             if _charge(store, mr_iid, head=head_sha):
                 gitlab_client.post_note(
                     mr, render_saturated(len(store.ledger.hunks)),

@@ -124,6 +124,15 @@ class Ledger:
         five hunks reached 1450 keys in a hundred pushes on fifty live hunks.
         Pruning to the current diff also gives saturation an exit.
         """
+        if len(self.hunks) < config.LEDGER_MAX_HUNKS and not self.saturated:
+            # Absent from one diff is not the same as never existed. A rebase
+            # onto a main that already carries some of your commits drops a
+            # file for a single push, and pruning eagerly made every finding in
+            # it post again on the next one — measured at ten re-posts for a
+            # file that flapped ten times. Collect only under pressure: the
+            # duplicate is worth paying when the alternative is going blind,
+            # and not before.
+            return self
         hunks = tuple(k for k in self.hunks if k in live)
         retried = tuple(k for k in self.retried if k in live)
         saturated = self.saturated and len(hunks) >= config.LEDGER_MAX_HUNKS
