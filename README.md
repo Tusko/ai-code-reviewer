@@ -245,7 +245,7 @@ Two situations skip a **full** file-by-file review:
     Sidorovich-style commit summary (surzhyk, swearing, 100–150 words) so
     the team can see what landed without waiting on the per-file loop.
     That roast uses OpenRouter (`OPENROUTER_MODEL`, default
-    `google/gemma-4-26b-a4b-it:free`) when `OPENROUTER_API_KEY` is set —
+    `google/gemini-2.5-flash-lite`) when `OPENROUTER_API_KEY` is set —
     local coder models cannot write surzhyk, and letting them try produces
     gibberish under Sidorovich's name. Without a key the bot posts a plain
     commit digest instead; set `SIDOROVICH_OLLAMA_FALLBACK=true` to let the

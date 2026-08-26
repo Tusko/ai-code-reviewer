@@ -46,11 +46,45 @@ PROMPT_TOKEN_BUFFER = env_int("PROMPT_TOKEN_BUFFER", 128)
 INCLUDE_FILE_CONTEXT = env_bool("INCLUDE_FILE_CONTEXT", False)
 CONTEXT_WINDOW = env_int("CONTEXT_WINDOW", 15)
 
+def paid_model(name: str) -> str:
+    """Strips a `:free` suffix. On OpenRouter the paid slug is the same one.
+
+    Free variants share one saturated upstream pool and 429 constantly, which
+    trips the voice circuit breaker and leaves half an MR dry. Rewriting is
+    loud rather than silent: an operator who typed `:free` on purpose has to
+    see that it was overruled.
+    """
+    stripped = (name or "").strip()
+    if stripped.endswith(":free"):
+        stripped = stripped[: -len(":free")]
+        logging.warning(
+            "Ignoring the :free variant of %s; using the paid slug %s",
+            name.strip(), stripped,
+        )
+    return stripped
+
+
+def env_models(name: str, default: list[str]) -> list[str]:
+    """env_list with every `:free` variant rewritten and duplicates dropped."""
+    seen, models = set(), []
+    for raw in env_list(name, default):
+        model = paid_model(raw)
+        if model and model not in seen:
+            seen.add(model)
+            models.append(model)
+    return models
+
+
 # OpenRouter — used only for release/hotfix Sidorovich summaries.
 # Empty key keeps those summaries on local Ollama.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY") or None
-OPENROUTER_MODEL = os.environ.get(
-    "OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free",
+# The voice runs once per finding, so it is the highest-volume call here — but
+# a fully budgeted MR costs under a cent whichever of these you pick, so the
+# choice is latency and instruction-following, not price. Flash-Lite is the
+# low-latency tier (VOICE_DEADLINE_S is 20s) and has to reproduce every *Fix:*
+# code fence byte-identically or preserves_findings throws the rewrite away.
+OPENROUTER_MODEL = paid_model(
+    os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite"),
 )
 OPENROUTER_BASE_URL = os.environ.get(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1",
@@ -58,7 +92,12 @@ OPENROUTER_BASE_URL = os.environ.get(
 # Extra models, tried in order after OPENROUTER_MODEL within a single request.
 # `:free` variants share one saturated upstream pool and 429 constantly; naming
 # a paid model here lets OpenRouter reroute instead of failing the summary.
-OPENROUTER_FALLBACK_MODELS = env_list("OPENROUTER_FALLBACK_MODELS", [])
+# A different family on purpose: a Gemini-side outage should not take the
+# voice down, and OpenRouter walks this list inside one request.
+OPENROUTER_FALLBACK_MODELS = [
+    m for m in env_models("OPENROUTER_FALLBACK_MODELS", ["google/gemma-4-26b-a4b-it"])
+    if m != OPENROUTER_MODEL
+]
 OPENROUTER_MAX_TOKENS = env_int("OPENROUTER_MAX_TOKENS", 512)
 # The voice rewrite has to re-emit the whole finding, *Fix:* code fences
 # included, so it needs far more room than the commit-list roast. Too low and
@@ -72,12 +111,15 @@ SIDOROVICH_OLLAMA_FALLBACK = env_bool("SIDOROVICH_OLLAMA_FALLBACK", False)
 
 # Review backend. Ollama no longer serves the review path; it remains only as
 # the optional Sidorovich voice fallback above.
-OPENROUTER_REVIEW_MODEL = os.environ.get(
-    "OPENROUTER_REVIEW_MODEL", "poolside/laguna-s-2.1",
+OPENROUTER_REVIEW_MODEL = paid_model(
+    os.environ.get("OPENROUTER_REVIEW_MODEL", "poolside/laguna-s-2.1"),
 )
 # Extra models tried in order after OPENROUTER_REVIEW_MODEL within one request.
 # Empty by default: a paid model already reroutes across providers on its own.
-OPENROUTER_REVIEW_FALLBACK_MODELS = env_list("OPENROUTER_REVIEW_FALLBACK_MODELS", [])
+OPENROUTER_REVIEW_FALLBACK_MODELS = [
+    m for m in env_models("OPENROUTER_REVIEW_FALLBACK_MODELS", [])
+    if m != OPENROUTER_REVIEW_MODEL
+]
 # Deliberately below the model's 1_048_576 window. Prompt tokens are billed and
 # estimate_tokens is a pessimistic len//3; one file whose diff exceeds this is
 # not something a single review call should attempt. Raise it to use the rest.
