@@ -105,10 +105,27 @@ def test_record_is_idempotent():
     assert value.hunks == ("aa", "bb", "cc")
 
 
-def test_record_evicts_oldest_past_cap(monkeypatch):
+def test_record_keeps_the_oldest_and_saturates_past_cap(monkeypatch):
+    """Evicting the oldest keys was the bug. select_files sorts smallest-first
+    and deterministically, so the evicted keys are exactly the ones the next
+    run reaches first — every /review replayed the whole merge request."""
     monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 3)
     value = Ledger().record(["a", "b", "c", "d"])
-    assert value.hunks == ("b", "c", "d")
+    assert value.hunks == ("a", "b", "c"), "the oldest keys must not be dropped"
+    assert value.saturated is True
+
+
+def test_a_saturated_ledger_stops_offering_retries(monkeypatch):
+    """It can no longer prove a hunk was untried, and guessing "not yet" is
+    what turns a failing post into an unbounded replay."""
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 2)
+    value = Ledger().record(["a", "b", "c"])
+    assert value.already_retried(["never-seen"]) is True
+
+
+def test_recording_a_hunk_frees_its_retry_slot():
+    value = Ledger().mark_retried(["a", "b"]).record(["a"])
+    assert value.retried == ("b",), "a settled hunk needs no retry slot"
 
 
 def test_remaining_counts_down_from_budget(monkeypatch):
@@ -229,3 +246,12 @@ def test_the_new_fields_fail_closed_on_a_wrong_shape():
         body = f"<!-- sidorovich-state:v1 {payload} -->"
         with pytest.raises(LedgerUnavailable):
             parse_marker(body)
+
+
+def test_already_retried_needs_every_hunk_of_the_file():
+    """any() would call a file retried as soon as one of its hunks had been,
+    so the rest would be recorded without ever getting their second attempt."""
+    value = Ledger().mark_retried(["a"])
+    assert value.already_retried(["a"]) is True
+    assert value.already_retried(["a", "b"]) is False
+    assert value.already_retried(["b"]) is False

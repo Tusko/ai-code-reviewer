@@ -43,6 +43,11 @@ class Ledger:
     muted: bool = False
     oversized: bool = False
     outage_reported: bool = False
+    # Set once the ledger can no longer track this MR hunk by hunk. Evicting
+    # the oldest keys looked harmless and was not: select_files sorts
+    # deterministically, so the evicted keys are exactly the ones needed first
+    # next run, and every /review replayed the whole merge request.
+    saturated: bool = False
     hunks: tuple[str, ...] = ()
     # Hunks whose comment failed to post once. A second failure records them
     # like any settled hunk: retrying for ever means every /review replays the
@@ -53,15 +58,22 @@ class Ledger:
         return max(0, config.MR_COMMENT_BUDGET - self.posted)
 
     def record(self, keys: Iterable[str]) -> "Ledger":
+        keys = list(keys)
         merged = list(self.hunks)
         known = set(self.hunks)
         for key in keys:
             if key not in known:
                 merged.append(key)
                 known.add(key)
+        # A hunk that settled needs no retry slot, so stop paying to store it.
+        settling = set(keys)
+        retried = tuple(k for k in self.retried if k not in settling)
         if len(merged) > config.LEDGER_MAX_HUNKS:
-            merged = merged[len(merged) - config.LEDGER_MAX_HUNKS:]
-        return replace(self, hunks=tuple(merged))
+            return replace(
+                self, hunks=tuple(merged[: config.LEDGER_MAX_HUNKS]),
+                retried=retried, saturated=True,
+            )
+        return replace(self, hunks=tuple(merged), retried=retried)
 
     def spend(self, n: int = 1) -> "Ledger":
         return replace(self, posted=self.posted + n)
@@ -84,11 +96,21 @@ class Ledger:
                 merged.append(key)
                 known.add(key)
         if len(merged) > config.LEDGER_MAX_HUNKS:
-            merged = merged[len(merged) - config.LEDGER_MAX_HUNKS:]
+            return replace(
+                self, retried=tuple(merged[: config.LEDGER_MAX_HUNKS]),
+                saturated=True,
+            )
         return replace(self, retried=tuple(merged))
 
     def already_retried(self, keys: Iterable[str]) -> bool:
-        """True once every one of these hunks has had its retry."""
+        """True once every one of these hunks has had its retry.
+
+        A saturated ledger answers True for everything: it can no longer prove
+        a hunk has not been tried, and guessing "not yet" is what turns a
+        failing post into an unbounded replay.
+        """
+        if self.saturated:
+            return True
         known = set(self.retried)
         return all(key in known for key in keys)
 
@@ -113,6 +135,7 @@ def to_marker(value: Ledger) -> str:
         "muted": value.muted,
         "oversized": value.oversized,
         "outage_reported": value.outage_reported,
+        "saturated": value.saturated,
         "retried": list(value.retried),
         "hunks": list(value.hunks),
     }
@@ -171,6 +194,13 @@ def parse_marker(body: str) -> Ledger:
             f"{type(outage_reported).__name__}",
         )
 
+    saturated = payload.get("saturated", False)
+    if not isinstance(saturated, bool):
+        raise LedgerUnavailable(
+            f"state marker field 'saturated' must be a bool, got "
+            f"{type(saturated).__name__}",
+        )
+
     hunks = payload.get("hunks", [])
     if not isinstance(hunks, list) or not all(isinstance(key, str) for key in hunks):
         raise LedgerUnavailable(
@@ -189,6 +219,7 @@ def parse_marker(body: str) -> Ledger:
         muted=muted,
         oversized=oversized,
         outage_reported=outage_reported,
+        saturated=saturated,
         hunks=tuple(hunks),
         retried=tuple(retried),
     )

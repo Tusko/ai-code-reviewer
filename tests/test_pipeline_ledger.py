@@ -727,3 +727,113 @@ def test_the_budget_note_reads_normally_when_comments_did_land():
 def test_the_budget_note_is_unchanged_for_a_run_with_no_outcomes():
     note = pipeline.render_budget_exhausted()
     assert "Розгреби те, що вже написав" in note
+
+
+def _always_fails_to_post(monkeypatch, recorder):
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_chat",
+        lambda system, user, deadline_s: pipeline.ChatResult(
+            "**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0,
+        ),
+    )
+    monkeypatch.setattr("reviewer.gitlab_client.post_inline", lambda *a: False)
+
+    def _note(mr, body):
+        if body.startswith("### "):
+            raise ConnectionError("gitlab hung up")
+        recorder.notes.append(body)
+
+    monkeypatch.setattr("reviewer.gitlab_client.post_note", _note)
+
+
+def test_a_saturated_ledger_does_not_replay_the_merge_request(harness, monkeypatch):
+    """Past LEDGER_MAX_HUNKS the ledger evicted its oldest keys — precisely the
+    ones select_files reaches first — so every /review posted a fresh full
+    round. Twenty-one of them reached six hundred comments."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
+    monkeypatch.setattr(
+        "reviewer.pipeline.review_file",
+        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+            file_diff.new_path, "clean", "",
+        ),
+    )
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(10)],
+    )
+    commands = 21
+    for _ in range(commands):
+        pipeline.review_merge_request(1, 1, force=True)
+
+    assert state["ledger"].saturated is True
+    # One answer per command is the /review contract. What must never happen is
+    # a fresh round of file comments per command, which is what eviction bought
+    # and what reached six hundred. The budget is not what stops it here: the
+    # run never gets far enough to spend one.
+    assert len(recorder.inline) == 0
+    assert len(recorder.notes) <= commands + 1, (
+        f"{len(recorder.notes)} notes from {commands} /review commands"
+    )
+    for note in recorder.notes[1:]:
+        assert "Нема чого дивитись" in note
+
+
+def test_the_budget_note_still_names_undelivered_on_a_second_review(
+    harness, monkeypatch,
+):
+    """The give-up used to rewrite the outcome to settled before the note read
+    it, so run two told the human to go read comments that never arrived."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.MR_COMMENT_BUDGET", 4)
+    _always_fails_to_post(monkeypatch, recorder)
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py") for i in range(6)],
+    )
+    pipeline.review_merge_request(1, 1)
+    pipeline.review_merge_request(1, 1, force=True)
+
+    assert recorder.notes, "the budget note is the only thing such a run posts"
+    for note in recorder.notes:
+        assert "Розгреби те, що вже написав" not in note, (
+            "nothing was ever delivered; there is nothing to go and read"
+        )
+
+
+def test_an_outage_that_raises_costs_nothing_either(harness, monkeypatch):
+    """The returning-outage shape was covered; the raising one was not, and it
+    skipped the save, so the last file's charge stayed and thirty pushes
+    muted the merge request."""
+    recorder, state = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+
+    def _raises(mr, file_diff, context, voice, review_state):
+        raise RuntimeError("the client blew up")
+
+    monkeypatch.setattr("reviewer.pipeline.review_file", _raises)
+    heads = {"n": 0}
+
+    def _diffs(mr):
+        heads["n"] += 1
+        FakeMR.diff_refs = {"base_sha": "b", "start_sha": "s",
+                            "head_sha": f"sha{heads['n']}"}
+        return [fd(f"f{i}.py") for i in range(5)]
+
+    monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", _diffs)
+
+    for _ in range(40):
+        pipeline.review_merge_request(1, 1)
+
+    assert state["ledger"].posted == 0, "an outage must not spend the budget"
+    assert state["ledger"].muted is False, "and must never mute the MR"
+    # _charge writes the charge to GitLab before review_file runs, so the
+    # refund has to be persisted per file too. Leaving it to the end of the run
+    # means anything that kills the run first leaves the charge standing.
+    assert state["saves"] / 40 >= 10, (
+        f"{state['saves'] / 40} saves per push: the refund is not persisted "
+        f"per file"
+    )

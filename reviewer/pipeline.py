@@ -103,6 +103,15 @@ def drop_known_hunks(
 
     A file whose every hunk is known disappears from the result entirely.
     """
+    if value.saturated:
+        # The ledger stopped being able to name what it has already reviewed.
+        # Treating the untracked remainder as unseen is what let a /review
+        # replay the whole merge request, so treat it as seen and go quiet.
+        logging.error(
+            "Ledger is saturated at LEDGER_MAX_HUNKS=%s; nothing further will "
+            "be reviewed on this MR", config.LEDGER_MAX_HUNKS,
+        )
+        return []
     known = set(value.hunks)
     fresh: list[FileDiff] = []
     for fd in file_diffs:
@@ -290,10 +299,7 @@ def render_budget_exhausted(outcomes: Sequence[FileOutcome] = ()) -> str:
     )
     undelivered = [o for o in outcomes if o.status == "reviewed" and not o.settled]
     if undelivered:
-        lines.append(
-            "Частина з них до GitLab не долетіла — я їх спробую ще раз на "
-            "наступному пуші:\n"
-        )
+        lines.append("Частина з них до GitLab не долетіла:\n")
         lines.extend(f"- `{o.path}` — {o.detail}" for o in undelivered)
         lines.append("")
     if undelivered and len(undelivered) == len(
@@ -602,26 +608,34 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 # nothing can have been posted by the time we get here, so the
                 # slot really is unspent.
                 store.ledger = store.ledger.refund()
+                # Persisted here, not left to the end of the loop body: the
+                # bare continue skipped the save, so the last file's charge
+                # stayed on the ledger and thirty outage pushes muted the MR.
+                _save_quietly(store, mr_iid)
                 continue
 
             outcomes.append(outcome)
             keys = [hunk_key(file_diff.new_path, h) for h in file_diff.hunks]
+            gave_up = False
             if not outcome.settled:
-                # One retry, then treat it as settled. Retrying for ever looks
+                # One retry, then record it anyway. Retrying for ever looks
                 # generous until you notice /review resets the budget: each
                 # command replayed the whole merge request, so twenty-one of
                 # them posted six hundred comments.
                 if store.ledger.already_retried(keys):
+                    gave_up = True
                     logging.error(
                         "MR !%s: %s failed to post twice; recording it rather "
                         "than replaying the MR on every /review",
                         mr_iid, file_diff.new_path,
                     )
-                    outcome = replace(outcome, settled=True)
-                    outcomes[-1] = outcome
                 else:
                     store.ledger = store.ledger.mark_retried(keys)
-            if outcome.status in ("reviewed", "clean") and outcome.settled:
+            # Deliberately a local, not a rewrite of the outcome: the closing
+            # note reads `settled` to tell the human which comments never
+            # arrived, and marking them delivered for the ledger's benefit made
+            # the note claim they had.
+            if outcome.status in ("reviewed", "clean") and (outcome.settled or gave_up):
                 # Only settled files are recorded. An errored or rate-limited
                 # file must be retried on the next push, so its hunks stay out.
                 store.ledger = store.ledger.record(keys)
@@ -657,6 +671,7 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 logging.error(
                     "MR !%s: still nothing reviewable; already reported", mr_iid,
                 )
+                _save_quietly(store, mr_iid)
         elif _charge(store, mr_iid, head=head_sha):
             gitlab_client.post_note(mr, render_summary(outcomes))
         logging.info("MR !%s reviewed in %.1fs", mr_iid, time.monotonic() - started)
