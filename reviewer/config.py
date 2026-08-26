@@ -98,12 +98,10 @@ OPENROUTER_FALLBACK_MODELS = [
     m for m in env_models("OPENROUTER_FALLBACK_MODELS", ["google/gemma-4-26b-a4b-it"])
     if m != OPENROUTER_MODEL
 ]
-OPENROUTER_MAX_TOKENS = env_int("OPENROUTER_MAX_TOKENS", 512)
-# The voice rewrite has to re-emit the whole finding, *Fix:* code fences
-# included, so it needs far more room than the commit-list roast. Too low and
-# every multi-finding review stops at finish_reason=length and silently posts
-# dry.
-OPENROUTER_VOICE_MAX_TOKENS = env_int("OPENROUTER_VOICE_MAX_TOKENS", 2048)
+# The commit roast is 100-150 words, but Cyrillic costs roughly twice the
+# tokens per character that English does on these tokenizers, so 512 clipped
+# the closing line off longer release lists.
+OPENROUTER_MAX_TOKENS = env_int("OPENROUTER_MAX_TOKENS", 1024)
 # qwen2.5-coder and friends cannot write Ukrainian surzhyk; letting them try
 # produces gibberish in Sidorovich's name. Off means: no OpenRouter, no roast —
 # release/hotfix MRs get a plain commit digest instead.
@@ -127,6 +125,17 @@ REVIEW_CONTEXT_TOKENS = env_int("REVIEW_CONTEXT_TOKENS", 262144)
 # Deliberately below the model's 131_072 ceiling. A single-file review needing
 # more than this is producing a wall of comments, which is what we prevent.
 REVIEW_MAX_OUTPUT_TOKENS = env_int("REVIEW_MAX_OUTPUT_TOKENS", 4096)
+
+# The voice rewrite has to re-emit the whole finding, *Fix:* code fences
+# included, and preserves_findings compares those fences byte for byte. A
+# rewrite that runs out of room fails that check and the comment silently ships
+# dry, so this is DERIVED from the review ceiling rather than guessed: whatever
+# a review is allowed to produce, the voice must be able to reproduce, plus
+# roughly half again for Cyrillic, which costs about twice the tokens per
+# character that English does.
+OPENROUTER_VOICE_MAX_TOKENS = env_int(
+    "OPENROUTER_VOICE_MAX_TOKENS", REVIEW_MAX_OUTPUT_TOKENS * 3 // 2,
+)
 
 # Tone. Off keeps summaries and inline comments dry. On adds a meme to the
 # summary and, when OpenRouter is keyed, rewrites inline findings as

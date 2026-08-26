@@ -84,7 +84,7 @@ def test_openrouter_defaults(monkeypatch):
     assert cfg.OPENROUTER_API_KEY is None
     assert cfg.OPENROUTER_MODEL == "google/gemini-2.5-flash-lite"
     assert cfg.OPENROUTER_BASE_URL == "https://openrouter.ai/api/v1"
-    assert cfg.OPENROUTER_MAX_TOKENS == 512
+    assert cfg.OPENROUTER_MAX_TOKENS == 1024
 
 
 def test_openrouter_env_overrides(monkeypatch):
@@ -170,3 +170,21 @@ def test_the_voice_default_is_never_a_free_or_batch_endpoint(monkeypatch):
     for model in [cfg.OPENROUTER_MODEL, *cfg.OPENROUTER_FALLBACK_MODELS]:
         assert not model.endswith(":free"), model
         assert not model.endswith(":batch"), model
+
+
+def test_the_voice_ceiling_tracks_the_review_ceiling(monkeypatch):
+    """preserves_findings compares *Fix:* fences byte for byte, so a rewrite
+    that runs out of room fails the check and the comment ships dry. Whatever
+    a review may produce, the voice has to be able to reproduce."""
+    cfg = _reload(monkeypatch)
+    assert cfg.OPENROUTER_VOICE_MAX_TOKENS > cfg.REVIEW_MAX_OUTPUT_TOKENS
+
+    raised = _reload(monkeypatch, REVIEW_MAX_OUTPUT_TOKENS="16384")
+    assert raised.OPENROUTER_VOICE_MAX_TOKENS > raised.REVIEW_MAX_OUTPUT_TOKENS, (
+        "raising the review ceiling must not leave the voice unable to keep up"
+    )
+
+
+def test_the_voice_ceiling_is_still_overridable(monkeypatch):
+    cfg = _reload(monkeypatch, OPENROUTER_VOICE_MAX_TOKENS="3000")
+    assert cfg.OPENROUTER_VOICE_MAX_TOKENS == 3000
