@@ -274,18 +274,43 @@ def render_oversized(count: int) -> str:
     return "\n".join(lines)
 
 
-def render_budget_exhausted() -> str:
-    """The closing comment when an MR has used its whole budget."""
+def render_budget_exhausted(outcomes: Sequence[FileOutcome] = ()) -> str:
+    """The closing comment when an MR has used its whole budget.
+
+    `outcomes` is passed so a run whose comments never reached GitLab says so.
+    This note is the only one such a run produces — the budget branch runs
+    before the summary — so without it the reader is told thirty comments were
+    spent and shown none of them.
+    """
     lines = []
     if config.SNARK:
         lines.append(f"_{snark()}_\n")
     lines.append(
         f"**Ліміт вичерпано: {config.MR_COMMENT_BUDGET} коментарів у цьому MR.**\n"
     )
-    lines.append(
-        "Далі мовчу до мержу. Розгреби те, що вже написав, а тоді кинь `/review` "
-        "у коментар — лічильник обнулиться.\n"
-    )
+    undelivered = [o for o in outcomes if o.status == "reviewed" and not o.settled]
+    if undelivered:
+        lines.append(
+            "Частина з них до GitLab не долетіла — я їх спробую ще раз на "
+            "наступному пуші:\n"
+        )
+        lines.extend(f"- `{o.path}` — {o.detail}" for o in undelivered)
+        lines.append("")
+    if undelivered and len(undelivered) == len(
+        [o for o in outcomes if o.status == "reviewed"]
+    ):
+        # Nothing this run wrote actually landed. Telling the reader to spend a
+        # /review here is telling them to replay a merge request that produced
+        # no visible comments at all.
+        lines.append(
+            "Дивитись поки нема на що. Полагодь звʼязок із GitLab, а тоді вже "
+            "кидай `/review`.\n"
+        )
+    else:
+        lines.append(
+            "Далі мовчу до мержу. Розгреби те, що вже написав, а тоді кинь "
+            "`/review` у коментар — лічильник обнулиться.\n"
+        )
     return "\n".join(lines)
 
 
@@ -580,12 +605,26 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 continue
 
             outcomes.append(outcome)
+            keys = [hunk_key(file_diff.new_path, h) for h in file_diff.hunks]
+            if not outcome.settled:
+                # One retry, then treat it as settled. Retrying for ever looks
+                # generous until you notice /review resets the budget: each
+                # command replayed the whole merge request, so twenty-one of
+                # them posted six hundred comments.
+                if store.ledger.already_retried(keys):
+                    logging.error(
+                        "MR !%s: %s failed to post twice; recording it rather "
+                        "than replaying the MR on every /review",
+                        mr_iid, file_diff.new_path,
+                    )
+                    outcome = replace(outcome, settled=True)
+                    outcomes[-1] = outcome
+                else:
+                    store.ledger = store.ledger.mark_retried(keys)
             if outcome.status in ("reviewed", "clean") and outcome.settled:
                 # Only settled files are recorded. An errored or rate-limited
                 # file must be retried on the next push, so its hunks stay out.
-                store.ledger = store.ledger.record(
-                    hunk_key(file_diff.new_path, h) for h in file_diff.hunks
-                )
+                store.ledger = store.ledger.record(keys)
             if outcome.status != "reviewed":
                 store.ledger = store.ledger.refund()
             _save_quietly(store, mr_iid)
@@ -597,7 +636,7 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
         if store.ledger.remaining() <= 1:
             store.ledger = store.ledger.mute()
             if _charge(store, mr_iid, head=head_sha):
-                gitlab_client.post_note(mr, render_budget_exhausted())
+                gitlab_client.post_note(mr, render_budget_exhausted(outcomes))
             logging.warning(
                 "MR !%s hit MR_COMMENT_BUDGET=%s; muted until /review",
                 mr_iid, config.MR_COMMENT_BUDGET,

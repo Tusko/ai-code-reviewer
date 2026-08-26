@@ -44,6 +44,10 @@ class Ledger:
     oversized: bool = False
     outage_reported: bool = False
     hunks: tuple[str, ...] = ()
+    # Hunks whose comment failed to post once. A second failure records them
+    # like any settled hunk: retrying for ever means every /review replays the
+    # whole merge request, and /review resets the budget that would cap it.
+    retried: tuple[str, ...] = ()
 
     def remaining(self) -> int:
         return max(0, config.MR_COMMENT_BUDGET - self.posted)
@@ -72,6 +76,22 @@ class Ledger:
     def unmute_and_reset(self) -> "Ledger":
         return replace(self, muted=False, posted=0)
 
+    def mark_retried(self, keys: Iterable[str]) -> "Ledger":
+        merged = list(self.retried)
+        known = set(self.retried)
+        for key in keys:
+            if key not in known:
+                merged.append(key)
+                known.add(key)
+        if len(merged) > config.LEDGER_MAX_HUNKS:
+            merged = merged[len(merged) - config.LEDGER_MAX_HUNKS:]
+        return replace(self, retried=tuple(merged))
+
+    def already_retried(self, keys: Iterable[str]) -> bool:
+        """True once every one of these hunks has had its retry."""
+        known = set(self.retried)
+        return all(key in known for key in keys)
+
     def report_outage(self) -> "Ledger":
         """Marks that the human has been told the backend produced nothing."""
         return replace(self, outage_reported=True)
@@ -93,6 +113,7 @@ def to_marker(value: Ledger) -> str:
         "muted": value.muted,
         "oversized": value.oversized,
         "outage_reported": value.outage_reported,
+        "retried": list(value.retried),
         "hunks": list(value.hunks),
     }
     return f"<!-- {MARKER_PREFIX} {json.dumps(payload, separators=(',', ':'))} -->"
@@ -156,6 +177,12 @@ def parse_marker(body: str) -> Ledger:
             "state marker field 'hunks' must be a list of strings",
         )
 
+    retried = payload.get("retried", [])
+    if not isinstance(retried, list) or not all(isinstance(k, str) for k in retried):
+        raise LedgerUnavailable(
+            "state marker field 'retried' must be a list of strings",
+        )
+
     return Ledger(
         head=head,
         posted=posted,
@@ -163,6 +190,7 @@ def parse_marker(body: str) -> Ledger:
         oversized=oversized,
         outage_reported=outage_reported,
         hunks=tuple(hunks),
+        retried=tuple(retried),
     )
 
 

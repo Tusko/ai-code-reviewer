@@ -4,7 +4,9 @@ import pytest
 
 from reviewer import ledger as ledger_mod
 from reviewer.diff_parser import Hunk
-from reviewer.ledger import Ledger, LedgerStore, LedgerUnavailable, hunk_key
+from reviewer.ledger import (
+    Ledger, LedgerStore, LedgerUnavailable, hunk_key, parse_marker, render_note,
+)
 
 
 def test_hunk_key_ignores_line_number_shift():
@@ -202,3 +204,28 @@ def test_store_save_creates_note_once_then_edits():
     store.save()
     assert len(mr.notes.created) == 1, "second save must edit, not post again"
     assert ledger_mod.parse_marker(mr.notes._notes[0].body).posted == 2
+
+
+def test_every_field_survives_the_marker_round_trip():
+    """A field dropped from to_marker never persists in production, and the
+    suite stayed green through it because the fake store held the object."""
+    from dataclasses import fields
+    full = Ledger(
+        head="abc1234", posted=7, muted=True, oversized=True,
+        outage_reported=True, hunks=("aaaaaaaaaaaa",), retried=("bbbbbbbbbbbb",),
+    )
+    back = parse_marker(render_note(full))
+    for f in fields(Ledger):
+        assert getattr(back, f.name) == getattr(full, f.name), f.name
+
+
+def test_the_new_fields_fail_closed_on_a_wrong_shape():
+    """Same rule as every other field: a present-but-wrong value must raise,
+    never be coerced into something that looks like a valid empty ledger."""
+    for payload, field in (('{"outage_reported": "yes"}', "outage_reported"),
+                           ('{"outage_reported": 1}', "outage_reported"),
+                           ('{"retried": "not-a-list"}', "retried"),
+                           ('{"retried": [1, 2]}', "retried")):
+        body = f"<!-- sidorovich-state:v1 {payload} -->"
+        with pytest.raises(LedgerUnavailable):
+            parse_marker(body)

@@ -4,7 +4,7 @@ import pytest
 
 from reviewer import config, pipeline
 from reviewer.diff_parser import FileDiff, Hunk
-from reviewer.ledger import Ledger, hunk_key
+from reviewer.ledger import Ledger, hunk_key, parse_marker, render_note
 from reviewer.pipeline import drop_known_hunks
 
 
@@ -30,11 +30,17 @@ class Recorder:
         self.inline = []
 
 
+def seed(state, ledger):
+    """Pre-loads the ledger the way GitLab would hold it: as a marker."""
+    state["note"] = render_note(ledger)
+    state["ledger"] = parse_marker(state["note"])
+
+
 @pytest.fixture
 def harness(monkeypatch):
     """Wires review_merge_request to fakes and returns (recorder, state)."""
     recorder = Recorder()
-    state = {"ledger": Ledger(), "saves": 0}
+    state = {"ledger": Ledger(), "saves": 0, "note": render_note(Ledger())}
     mr = FakeMR()
 
     monkeypatch.setattr(
@@ -50,16 +56,16 @@ def harness(monkeypatch):
     )
 
     class FakeStore:
+        """Round-trips through the real marker, exactly as GitLab would.
+
+        Holding the Ledger object directly was a trap: dropping a field from
+        to_marker left the whole suite green while, in production, the flag
+        never persisted and its note repeated on every push.
+        """
+
         def __init__(self):
             self.mr = mr
-
-        @property
-        def ledger(self):
-            return state["ledger"]
-
-        @ledger.setter
-        def ledger(self, value):
-            state["ledger"] = value
+            self.ledger = parse_marker(state["note"])
 
         @classmethod
         def load(cls, mr):
@@ -67,6 +73,10 @@ def harness(monkeypatch):
 
         def save(self):
             state["saves"] += 1
+            state["note"] = render_note(self.ledger)
+            # Read straight back, so a field that does not survive the marker
+            # cannot survive the test either.
+            state["ledger"] = parse_marker(state["note"])
 
     monkeypatch.setattr("reviewer.pipeline.LedgerStore", FakeStore)
     monkeypatch.setattr("reviewer.config.SNARK", False)
@@ -129,9 +139,7 @@ def test_unchanged_diff_posts_absolutely_nothing(harness, monkeypatch):
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
     diff = fd("a.py")
     monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [diff])
-    state["ledger"] = Ledger().record(
-        [hunk_key("a.py", h) for h in diff.hunks]
-    )
+    seed(state, Ledger().record([hunk_key("a.py", h) for h in diff.hunks]))
     pipeline.review_merge_request(1, 1)
     assert recorder.notes == []
     assert recorder.inline == []
@@ -243,7 +251,7 @@ def test_the_summary_note_costs_a_slot(harness, monkeypatch):
 def test_muted_mr_ignores_a_plain_push(harness, monkeypatch):
     recorder, state = harness
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
-    state["ledger"] = Ledger(muted=True)
+    seed(state, Ledger(muted=True))
     monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [fd("a.py")])
     pipeline.review_merge_request(1, 1)
     assert recorder.notes == []
@@ -259,7 +267,7 @@ def test_force_review_clears_mute_and_resets_budget(harness, monkeypatch):
         "reviewer.pipeline.review_chat",
         lambda system, user, deadline_s: pipeline.ChatResult("[LGTM]", "stop", 0, 0, 0.0),
     )
-    state["ledger"] = Ledger(muted=True, posted=30)
+    seed(state, Ledger(muted=True, posted=30))
     monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [fd("a.py")])
     pipeline.review_merge_request(1, 1, force=True)
     assert state["ledger"].muted is False
@@ -358,7 +366,7 @@ def test_force_on_a_fully_reviewed_mr_answers_instead_of_vanishing(harness, monk
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
     diff = fd("a.py")
     monkeypatch.setattr("reviewer.gitlab_client.fetch_file_diffs", lambda mr: [diff])
-    state["ledger"] = Ledger().record([hunk_key("a.py", h) for h in diff.hunks])
+    seed(state, Ledger().record([hunk_key("a.py", h) for h in diff.hunks]))
     pipeline.review_merge_request(1, 1, force=True)
     assert len(recorder.notes) == 1
     assert "нема чого дивитись" in recorder.notes[0].lower()
@@ -481,13 +489,14 @@ def test_a_comment_that_may_have_posted_keeps_its_slot(harness, monkeypatch):
     for _ in range(20):
         pipeline.review_merge_request(1, 1)
 
-    # Retried, because the post may never have landed and losing a real finding
-    # silently is worse than a duplicate. The budget is what bounds the retries.
-    assert len(recorder.inline) <= config.MR_COMMENT_BUDGET, (
-        f"{len(recorder.inline)} comments against a budget of "
-        f"{config.MR_COMMENT_BUDGET}"
-    )
-    assert state["ledger"].muted is True, "the budget, not the retry loop, stops it"
+    # Retried once, because the post may never have landed and losing a real
+    # finding silently is worse than a duplicate — then recorded, so it
+    # converges instead of replaying on every push.
+    assert len(recorder.inline) == 20, "ten files, one retry each, then settled"
+    before = len(recorder.inline)
+    for _ in range(20):
+        pipeline.review_merge_request(1, 1)
+    assert len(recorder.inline) == before, "further pushes must cost nothing"
 
 
 def test_two_broken_files_do_not_kill_review_of_the_healthy_ones(harness, monkeypatch):
@@ -687,3 +696,34 @@ def test_a_second_outage_is_reported_again(harness, monkeypatch):
     )
     pipeline.review_merge_request(1, 1)
     assert len(recorder.notes) == 3, "the new outage earns its own report"
+
+
+def _reviewed(path, settled):
+    return pipeline.FileOutcome(path, "reviewed", "could not be posted", settled)
+
+
+def test_the_budget_note_does_not_invite_review_when_nothing_landed():
+    """The budget branch runs before the summary, so this note is the only
+    thing such a run produces. Telling the reader to spend a /review here is
+    telling them to replay a merge request that showed them nothing."""
+    note = pipeline.render_budget_exhausted(
+        [_reviewed("a.py", False), _reviewed("b.py", False)],
+    )
+    assert "`/review`" in note, "the command is still named, just not urged"
+    assert "Полагодь звʼязок" in note
+    assert "Розгреби те, що вже написав" not in note
+    assert "`a.py`" in note and "`b.py`" in note
+
+
+def test_the_budget_note_reads_normally_when_comments_did_land():
+    note = pipeline.render_budget_exhausted(
+        [_reviewed("a.py", True), _reviewed("b.py", False)],
+    )
+    assert "Розгреби те, що вже написав" in note
+    assert "`b.py`" in note, "the one that failed is still named"
+    assert "Полагодь звʼязок" not in note
+
+
+def test_the_budget_note_is_unchanged_for_a_run_with_no_outcomes():
+    note = pipeline.render_budget_exhausted()
+    assert "Розгреби те, що вже написав" in note
