@@ -1,6 +1,9 @@
 from reviewer import config
 from reviewer import prompt as prompt_mod
 from reviewer.diff_parser import Hunk
+from reviewer.memes import (
+    closer_for, opener_for, sidorovich_closers, sidorovich_openers,
+)
 from reviewer.prompt import (
     SYSTEM_PROMPT, SIDOROVICH_SYSTEM_PROMPT, SIDOROVICH_REVIEW_VOICE_PROMPT,
     build_commit_summary_prompt,
@@ -160,3 +163,74 @@ def test_input_token_budget_floors_at_256(monkeypatch):
     monkeypatch.setattr("reviewer.config.REVIEW_CONTEXT_TOKENS", 100)
     monkeypatch.setattr("reviewer.config.REVIEW_MAX_OUTPUT_TOKENS", 90)
     assert prompt_mod.input_token_budget() == 256
+
+
+def test_the_prompt_no_longer_mandates_a_swear_opener():
+    """"Починай з матюка" collapsed every release roast onto the same word:
+    the prompt is byte-identical each call, so the first token went to the
+    mode every time."""
+    assert "Починай з матюка" not in SIDOROVICH_SYSTEM_PROMPT
+    # The literal moral example was copied verbatim into the output too.
+    assert "шукайте собі нову хату" not in SIDOROVICH_SYSTEM_PROMPT
+
+
+def test_the_opener_is_injected_and_quoted_once():
+    text = build_commit_summary_prompt(
+        [{"short_id": "a", "title": "MONO-1 fix", "author": "x"}],
+        opener="Оце номер.",
+    )
+    assert "«Оце номер.»" in text
+    assert "MONO-1" in text
+
+
+def test_no_opener_leaves_the_prompt_alone():
+    text = build_commit_summary_prompt(
+        [{"short_id": "a", "title": "MONO-1 fix", "author": "x"}],
+    )
+    assert "зачин" not in text.lower()
+
+
+def test_opener_for_is_deterministic_and_spread():
+    """Deterministic because the Ukrainian retry re-sends the same request:
+    an opener that changed between attempts reads as a different person."""
+    assert opener_for("abc") == opener_for("abc")
+    seen = {opener_for(f"fingerprint-{i}") for i in range(400)}
+    assert len(seen) > len(sidorovich_openers) * 0.8, (
+        f"only {len(seen)} of {len(sidorovich_openers)} openers ever chosen"
+    )
+
+
+def test_no_opener_starts_with_the_word_it_replaced():
+    assert not any(o.lower().startswith("блять") for o in sidorovich_openers)
+
+
+def test_the_language_rule_no_longer_donates_a_roast_opener():
+    """The "Добре:" example was a complete opening sentence, and the model
+    copied it verbatim: three roasts in a sampled ten opened on it."""
+    assert "недолугий висер у репозиторій" not in SIDOROVICH_SYSTEM_PROMPT
+    assert "чайник" in SIDOROVICH_SYSTEM_PROMPT, "the minimal pair must survive"
+    assert "этот" in SIDOROVICH_SYSTEM_PROMPT, "it still has to teach the failure"
+
+
+def test_the_worn_out_tics_are_banned():
+    for tic in ("без нормального рев'ю", "пішли всі нахуй",
+                "шукайте собі нову роботу"):
+        assert tic in SIDOROVICH_SYSTEM_PROMPT, f"{tic!r} must be named as banned"
+    assert 'Не починай останнє речення зі слова "Якщо"' in SIDOROVICH_SYSTEM_PROMPT
+
+
+def test_the_closer_mode_is_injected():
+    text = build_commit_summary_prompt(
+        [{"short_id": "a", "title": "MONO-1 fix", "author": "x"}],
+        opener="Тю.", closer="ультиматум з дедлайном",
+    )
+    assert "ультиматум з дедлайном" in text
+    assert "«Тю.»" in text
+
+
+def test_opener_and_closer_rotate_independently():
+    """Sharing one hash byte would pin every opener to one closer forever."""
+    pairs = {(opener_for(f"s{i}"), closer_for(f"s{i}")) for i in range(600)}
+    assert len(pairs) > len(sidorovich_openers) * 3, (
+        f"only {len(pairs)} distinct opener/closer pairs"
+    )

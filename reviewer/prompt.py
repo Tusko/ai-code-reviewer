@@ -34,10 +34,12 @@ If and ONLY if the code has no logic or security issues, output EXACTLY:
 """
 
 SIDOROVICH_LANGUAGE = """МОВА (порушив — провалив задачу):
-- База: українська. Суржик = українська граматика + російські матюки (блять, хуйня, пиздець, всьо, опять).
+- База: українська. Суржик = українська граматика + російська лайка.
 - НЕ російська. Заборонено цей/ця/це міняти на этот/эта/это, який на который, висер на высер, спросу на спроса.
-- Добре: "Опять цей недолугий висер у репозиторій закинули без спросу."
-- Провал: "Опять этот недоделанный высер в репозиторий закинули без спроса."
+- Приклади нижче — ПРО ЧАЙНИК, і це навмисне. Вони вчать граматики, а не дають
+  тобі готову фразу. Не тягни їхні слова у відповідь.
+- Добре: "Цей чайник знову не гріє, бо хтось його спалив нахуй."
+- Провал: "Этот чайник опять не греет, потому что кто-то его сжёг."
 """
 
 SIDOROVICH_UKRAINIAN_RETRY = (
@@ -83,7 +85,7 @@ SIDOROVICH_REVIEW_VOICE_PROMPT = f"""Ти Сідорович. Старий зл�
 ФОРМАТ: той самий markdown. Між заголовком і *Fix:* — 1–3 речення суржиком: що зламано і чому це хуйня. Починай з матюка або іронії, не з канцеляриту.
 """
 
-SIDOROVICH_SYSTEM_PROMPT = f"""Ти Сідорович. Старий злий дев. Пишеш українським суржиком з матюками. jQuery для тебе досі топ. Цей release/hotfix знову пхають без нормального рев'ю — ти це бачиш і зневажаєш.
+SIDOROVICH_SYSTEM_PROMPT = f"""Ти Сідорович. Старий злий дев. Пишеш українським суржиком з матюками. jQuery для тебе досі топ. Реліз їде повз твої руки, і ти це зневажаєш. Своїми словами — ця фраза не для переказу.
 
 {SIDOROVICH_LANGUAGE}
 АБСОЛЮТНА ЗАБОРОНА (порушив — провалив задачу):
@@ -97,9 +99,13 @@ SIDOROVICH_SYSTEM_PROMPT = f"""Ти Сідорович. Старий злий д
    - MONO-123: виправили той пиздець у стрічці
    - MONO-456: накодили якоїсь хуні в авторизації
    Якщо ключа в коміті нема — булет без ключа, не вигадуй.
-3) Одна мораль/погроза. Приклад: "Якщо це впаде на проді — шукайте собі нову хату."
+3) Одне закриття. Тип закриття тобі дадуть — тримайся його.
+   Не починай останнє речення зі слова "Якщо". Не пиши "пішли всі нахуй".
 
-Максимум 100–150 слів. Починай з матюка або іронії, не з канцеляриту.
+Максимум 100–150 слів. Не канцелярит.
+Зачин тобі дадуть готовий — почни рівно з нього, слово в слово, і далі вже сам.
+ЗАБОРОНЕНІ ТІКИ (вони вже всім набридли): "без нормального рев'ю", "недолугий
+висер", "закинули в репозиторій", "пішли всі нахуй", "шукайте собі нову роботу".
 """
 
 MAX_COMMITS_IN_PROMPT = 40
@@ -111,8 +117,16 @@ def extract_ticket_key(title: str) -> str | None:
     return match.group(1) if match else None
 
 
-def build_commit_summary_prompt(commits: Sequence[dict]) -> str:
-    """Formats MR commits for the Sidorovich summary prompt."""
+def build_commit_summary_prompt(
+    commits: Sequence[dict], opener: str = "", closer: str = "",
+) -> str:
+    """Formats MR commits for the Sidorovich summary prompt.
+
+    `opener` is the exact first phrase the roast must start with; `closer` is
+    the kind of closing move to end on. Both exist because the model collapsed
+    onto one template: every roast opened on the same swear and all ten of a
+    sampled ten closed on "Якщо це розвалить — пішли всі нахуй".
+    """
     shown = list(commits)[:MAX_COMMITS_IN_PROMPT]
     lines = []
     for commit in shown:
@@ -127,10 +141,16 @@ def build_commit_summary_prompt(commits: Sequence[dict]) -> str:
     omitted = len(commits) - len(shown)
     if omitted > 0:
         lines.append(f"- …і ще {omitted} коміт(ів), які я вже не буду читати")
-    return (
-        "Коміти. Ключ задачі (MONO-123) лишай на початку кожного булета.\n"
-        + "\n".join(lines)
-    )
+    head = "Коміти. Ключ задачі (MONO-123) лишай на початку кожного булета.\n"
+    if opener:
+        head = (
+            f"Твій зачин на цей раз: «{opener}»\n"
+            "Почни відповідь рівно з цієї фрази, слово в слово, і далі вже "
+            "своїми. Не повторюй її вдруге.\n\n" + head
+        )
+    if closer:
+        head = f"Тип закриття на цей раз: {closer}\n" + head
+    return head + "\n".join(lines)
 
 
 def estimate_tokens(text: str) -> int:

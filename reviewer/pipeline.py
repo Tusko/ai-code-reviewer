@@ -10,7 +10,7 @@ from reviewer.chat_types import FINDING_TAGS, LGTM_TEXT, ChatResult
 from reviewer.diff_parser import FileDiff, Hunk
 from reviewer.filters import is_reviewable
 from reviewer.ledger import Ledger, LedgerStore, LedgerUnavailable, hunk_key
-from reviewer.memes import snark
+from reviewer.memes import closer_for, opener_for, snark
 from reviewer.openrouter_client import review_chat
 from reviewer.queue import DedupeCache
 from reviewer.voice import VoiceState, flavor_review, prefer_ukrainian
@@ -398,7 +398,13 @@ def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool, store) -
         )
         return
 
-    user = prompt_mod.build_commit_summary_prompt(commits)
+    # Seeded from the fingerprint, so the same commits always get the same
+    # opener and two different merge requests almost never share one.
+    user = prompt_mod.build_commit_summary_prompt(
+        commits,
+        opener=opener_for(fingerprint),
+        closer=closer_for(fingerprint),
+    )
     result = prefer_ukrainian(
         summary_chat(
             prompt_mod.SIDOROVICH_SYSTEM_PROMPT,

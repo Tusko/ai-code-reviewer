@@ -1,3 +1,4 @@
+import hashlib
 import random
 
 meme_phrases = [
@@ -133,3 +134,80 @@ meme_phrases = [
 def snark() -> str:
     """One random meme phrase, for flavouring the MR summary."""
     return random.choice(meme_phrases)
+
+
+# Openers for the release/hotfix roast. The prompt used to say "почни з
+# матюка", so every roast opened on the same highest-probability swear. The
+# bank is deliberately mostly not obscene: variety is the point, not volume.
+sidorovich_openers = [
+    "Ну от знову.",
+    "Оце так свято.",
+    "Так, тихо всі.",
+    "Сідайте, два.",
+    "Я на це дивитись не буду.",
+    "Ага, реліз.",
+    "Хто це писав — встаньте.",
+    "Знову п'ятниця, знову хотфікс.",
+    "Йо-майо.",
+    "Ти диви, встигли.",
+    "Оце ви розігналися.",
+    "Ну добре, глянемо на цей цирк.",
+    "Приїхали.",
+    "Опа.",
+    "Так-так-так.",
+    "Матінко рідна.",
+    "Ой лишенько.",
+    "Тримайте мене семеро.",
+    "Оце я розумію підготовка.",
+    "Слухайте сюди.",
+    "Курва.",
+    "От халепа.",
+    "Ну шо, погнали.",
+    "Знову двадцять п'ять.",
+    "Здорові були.",
+    "Дожилися.",
+    "Оце номер.",
+    "Тю.",
+    "Ша, я читаю.",
+    "Господи, дай сили.",
+]
+
+
+def opener_for(seed: str) -> str:
+    """One opener, chosen deterministically from seed.
+
+    Deterministic on purpose. The Ukrainian retry re-sends the same request
+    with history, and an opener that changed between the two attempts would
+    read as a different person mid-sentence.
+    """
+    digest = hashlib.sha256((seed or "").encode()).digest()
+    return sidorovich_openers[digest[0] % len(sidorovich_openers)]
+
+
+# Closing moves. All ten roasts in a sampled batch ended on the same speech act
+# ("Якщо це розвалить — пішли всі нахуй"), because the prompt asked for
+# "мораль/погроза" and a threat has one obvious shape. Rotating the *move*,
+# not the wording, is what breaks the template.
+sidorovich_closers = [
+    "погроза, але без слова «якщо» — просто скажи, що буде",
+    "фаталізм: ти вже нічого не чекаєш від цих людей",
+    "удавана байдужість: не твій проєкт, не твої проблеми",
+    "парі: постав на те, скільки воно протримається",
+    "порада згори, як старший молодшому, зневажливо",
+    "прокляття в бік того, хто це мерджив",
+    "питання в нікуди, на яке ніхто не відповість",
+    "похвала крізь зуби, з якої ясно, що це не похвала",
+    "зняття з себе відповідальності наперед",
+    "ультиматум з дедлайном",
+    "порівняння з чимось побутовим і безнадійним",
+    "спогад про те, як колись робили нормально",
+    "пропозиція випити за упокій продакшену",
+    "коротка обіцянка, що ти це запам'ятаєш",
+    "згадка, що ти попереджав, і тебе не слухали",
+]
+
+
+def closer_for(seed: str) -> str:
+    """One closing move, deterministic on seed. See opener_for."""
+    digest = hashlib.sha256((seed or "").encode()).digest()
+    return sidorovich_closers[digest[1] % len(sidorovich_closers)]
