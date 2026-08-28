@@ -43,8 +43,12 @@ OLLAMA_NUM_BATCH = env_int("OLLAMA_NUM_BATCH", 512)
 
 # Prompt budget
 PROMPT_TOKEN_BUFFER = env_int("PROMPT_TOKEN_BUFFER", 128)
-INCLUDE_FILE_CONTEXT = env_bool("INCLUDE_FILE_CONTEXT", False)
-CONTEXT_WINDOW = env_int("CONTEXT_WINDOW", 15)
+# Off, and a 15-line window, were sized for an 8192-token Ollama context. The
+# review backend now budgets a quarter of a million tokens per call, and with
+# context off the model saw the hunk and nothing else — 83 tokens for a change
+# in a 722-line file. 80 lines costs about 2.3k tokens, roughly 1% of budget.
+INCLUDE_FILE_CONTEXT = env_bool("INCLUDE_FILE_CONTEXT", True)
+CONTEXT_WINDOW = env_int("CONTEXT_WINDOW", 80)
 
 def paid_model(name: str) -> str:
     """Strips a `:free` suffix. On OpenRouter the paid slug is the same one.

@@ -585,3 +585,42 @@ def test_select_files_keeps_smallest_first(monkeypatch):
     files = [fd("big.py", added=9), fd("small.py", added=1), fd("mid.py", added=4)]
     kept, _ = select_files(files, [])
     assert [f.new_path for f in kept] == ["small.py", "mid.py"]
+
+
+def test_the_ladder_sends_the_whole_file_first(monkeypatch):
+    """A window centred on a hunk never reaches the top of the file, so the
+    model could not see the imports that say what a called name even is."""
+    monkeypatch.setattr("reviewer.config.INCLUDE_FILE_CONTEXT", True)
+    monkeypatch.setattr("reviewer.config.CONTEXT_WINDOW", 1)
+    whole = "import os\n" + "\n".join(f"line {i}" for i in range(200))
+    ladder = build_prompt_ladder("a.py", [Hunk(150, 150, (" a", "+b"))], whole)
+
+    levels = [level for level, _ in ladder]
+    assert levels[0] == "L0"
+    assert "import os" in ladder[0][1], "the whole file means the imports too"
+
+
+def test_an_oversized_file_narrows_instead_of_losing_all_context(monkeypatch):
+    """Without the L0w rung a file that overflows the budget dropped straight
+    to L1 — no context at all — rather than to a window."""
+    monkeypatch.setattr("reviewer.config.INCLUDE_FILE_CONTEXT", True)
+    monkeypatch.setattr("reviewer.config.CONTEXT_WINDOW", 3)
+    whole = "\n".join(f"line {i}" for i in range(400))
+    ladder = build_prompt_ladder("a.py", [Hunk(200, 200, (" a", "+b"))], whole)
+
+    levels = [level for level, _ in ladder]
+    assert levels[:3] == ["L0", "L0w", "L1"]
+    l0w = dict(ladder)["L0w"]
+    assert "line 199" in l0w, "the window still surrounds the hunk"
+    assert "line 10" not in l0w, "but it is genuinely narrower than the file"
+    assert len(l0w) < len(dict(ladder)["L0"])
+
+
+def test_the_ladder_skips_the_narrow_rung_when_it_would_be_the_whole_file(monkeypatch):
+    """A short file is already its own window; two identical rungs would just
+    spend a second model call on the same prompt."""
+    monkeypatch.setattr("reviewer.config.INCLUDE_FILE_CONTEXT", True)
+    monkeypatch.setattr("reviewer.config.CONTEXT_WINDOW", 500)
+    whole = "\n".join(f"line {i}" for i in range(10))
+    ladder = build_prompt_ladder("a.py", [Hunk(5, 5, (" a", "+b"))], whole)
+    assert [level for level, _ in ladder] == ["L0", "L1"]

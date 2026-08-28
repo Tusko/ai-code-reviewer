@@ -12,13 +12,24 @@ config.configure_logging()
 
 app = Flask(__name__)
 
+_review_llm = f"openrouter:{config.OPENROUTER_REVIEW_MODEL}"
+if config.OPENROUTER_REVIEW_FALLBACK_MODELS:
+    _review_llm += " -> " + " -> ".join(config.OPENROUTER_REVIEW_FALLBACK_MODELS)
+if not config.OPENROUTER_API_KEY:
+    _review_llm += "  [NO API KEY — every file will error]"
 logging.info(
-    "Ollama config: host=%s model=%s num_ctx=%s num_predict=%s num_batch=%s "
-    "include_context=%s per_file_timeout=%ss mr_timeout=%ss max_files=%s",
-    config.OLLAMA_HOST, config.OLLAMA_MODEL, config.OLLAMA_NUM_CTX,
-    config.OLLAMA_NUM_PREDICT, config.OLLAMA_NUM_BATCH, config.INCLUDE_FILE_CONTEXT,
+    "Review LLM: %s ctx=%s max_out=%s per_file_timeout=%ss mr_timeout=%ss "
+    "max_files=%s include_context=%s",
+    _review_llm, config.REVIEW_CONTEXT_TOKENS, config.REVIEW_MAX_OUTPUT_TOKENS,
     config.PER_FILE_TIMEOUT_S, config.MR_TIMEOUT_S, config.MAX_FILES,
+    config.INCLUDE_FILE_CONTEXT,
 )
+if config.SIDOROVICH_OLLAMA_FALLBACK:
+    logging.info(
+        "Ollama voice fallback: host=%s model=%s num_ctx=%s num_predict=%s "
+        "num_batch=%s", config.OLLAMA_HOST, config.OLLAMA_MODEL,
+        config.OLLAMA_NUM_CTX, config.OLLAMA_NUM_PREDICT, config.OLLAMA_NUM_BATCH,
+    )
 if config.OPENROUTER_API_KEY:
     _sidorovich_llm = f"openrouter:{config.OPENROUTER_MODEL}"
     if config.OPENROUTER_FALLBACK_MODELS:

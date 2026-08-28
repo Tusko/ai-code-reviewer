@@ -37,9 +37,19 @@ def test_defaults_match_16gb_tuning(monkeypatch):
     assert cfg.OLLAMA_NUM_CTX == 8192
     assert cfg.OLLAMA_NUM_PREDICT == 320
     assert cfg.OLLAMA_NUM_BATCH == 512
-    assert cfg.INCLUDE_FILE_CONTEXT is False
-    assert cfg.CONTEXT_WINDOW == 15
     assert cfg.MAX_FILES == 40
+
+
+def test_file_context_is_sized_for_the_review_backend(monkeypatch):
+    """Off with a 15-line window was Ollama-era tuning for an 8192-token
+    context. The review path is OpenRouter now and budgets a quarter of a
+    million tokens per call; with context off the model saw the hunk and
+    nothing else."""
+    for key in ("INCLUDE_FILE_CONTEXT", "CONTEXT_WINDOW"):
+        monkeypatch.delenv(key, raising=False)
+    cfg = _reload(monkeypatch)
+    assert cfg.INCLUDE_FILE_CONTEXT is True
+    assert cfg.CONTEXT_WINDOW >= 40, "a window this narrow predates the backend"
 
 
 def test_env_overrides_are_applied(monkeypatch):

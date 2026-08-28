@@ -125,10 +125,24 @@ def drop_known_hunks(
 # per-hunk rung no longer fires in practice. It is kept because it is what
 # guarantees no file is silently dropped for being too large.
 def build_prompt_ladder(path: str, hunks: Sequence[Hunk], context: str) -> list[tuple[str, str]]:
-    """Ordered attempts, cheapest-viable first. L3 is the absence of any fitting level."""
+    """Ordered attempts, richest-viable first. L3 is the absence of any fitting level.
+
+    `context` is the whole file when we have it. L0 sends it entire, which is
+    the only rung that shows the model the file's imports — a window centred on
+    a hunk never reaches the top of the file, so the model saw `foo(x)` with no
+    way to tell whether foo was local, imported or built in.
+
+    L0w exists so an oversized file degrades to a window rather than falling
+    straight to no context at all.
+    """
     ladder: list[tuple[str, str]] = []
     if config.INCLUDE_FILE_CONTEXT and context:
         ladder.append(("L0", prompt_mod.build_file_prompt(path, hunks, context)))
+        narrowed = gitlab_client.surgical_context(
+            context, hunks, config.CONTEXT_WINDOW,
+        )
+        if narrowed and len(narrowed) < len(context):
+            ladder.append(("L0w", prompt_mod.build_file_prompt(path, hunks, narrowed)))
     ladder.append(("L1", prompt_mod.build_file_prompt(path, hunks)))
     if len(hunks) > 1:
         for hunk in hunks:
@@ -610,13 +624,11 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
 
             context = ""
             if config.INCLUDE_FILE_CONTEXT:
-                content = gitlab_client.fetch_file_content(
+                # The whole file, not a pre-cut window: the ladder decides how
+                # much of it actually fits, and narrows only when it must.
+                context = gitlab_client.fetch_file_content(
                     project, file_diff.new_path, mr.source_branch,
                 )
-                if content:
-                    context = gitlab_client.surgical_context(
-                        content, file_diff.hunks, config.CONTEXT_WINDOW,
-                    )
 
             # Charged before review_file posts anything, and refunded below if
             # it turns out nothing was posted. Saved per file, not once at the
