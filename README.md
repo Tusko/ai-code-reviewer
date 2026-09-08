@@ -74,6 +74,37 @@ This project sets up a local AI Code Review bot that integrates with GitLab Merg
 
 You can change or extend the keyword by editing `review_server.py` if desired.
 
+## MR hygiene checks
+
+Before every AI review the bot audits the MR itself and posts a separate
+(deliberately blunt) comment when it finds problems:
+
+*   **Title format.** The title must start with a bare ticket key, e.g.
+    `MONO-1628: reuse browser tabs`. Conventional-commit wrappers such as
+    `fix(MONO-1628): ...` are rejected. A `Draft:` or `WIP:` prefix is allowed.
+    Override the rule with `MR_TITLE_PATTERN` in `.env`.
+*   **Assignment.** An MR with neither an assignee nor a reviewer gets nagged.
+    One of the two is enough.
+
+The nag is posted as its own note and never blocks the AI review — both
+comments land on the MR.
+
+Because GitLab fires the webhook on every MR update, each hygiene comment
+carries a hidden marker (`<!-- ai-reviewer:hygiene:title,assign -->`). The bot
+skips posting when a note with the same set of issues already exists, so
+fixing one issue produces exactly one new comment about what is still wrong.
+
+Branches whose name starts with a prefix in `IGNORED_BRANCH_PREFIXES`
+(default `release/,hotfix/`) skip both the hygiene check and the AI review.
+
+### Running the tests
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt pytest
+.venv/bin/python -m pytest test_hygiene.py
+```
+
 ## Tuning for Mac Mini M4 16 GB
 
 The Flask app talks to **Ollama running on the host** (not in Docker). On 16 GB

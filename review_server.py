@@ -72,6 +72,96 @@ MAX_PROMPT_CHARS = int(os.environ.get('MAX_PROMPT_CHARS', '120000'))
 PROMPT_TOKEN_BUFFER = int(os.environ.get('PROMPT_TOKEN_BUFFER', '128'))
 MIN_OUTPUT_TOKENS = int(os.environ.get('MIN_OUTPUT_TOKENS', '30'))
 
+
+# ==========================================
+# MR HYGIENE (title format / assignment)
+# ==========================================
+DEFAULT_MR_TITLE_PATTERN = r'^(?:Draft:\s*|WIP:\s*)?[A-Z][A-Z0-9]+-\d+: .+'
+MR_TITLE_PATTERN = re.compile(
+    os.environ.get('MR_TITLE_PATTERN', DEFAULT_MR_TITLE_PATTERN)
+)
+IGNORED_BRANCH_PREFIXES = tuple(
+    prefix.strip()
+    for prefix in os.environ.get('IGNORED_BRANCH_PREFIXES', 'release/,hotfix/').split(',')
+    if prefix.strip()
+)
+TICKET_RE = re.compile(r'[A-Z][A-Z0-9]+-\d+')
+HYGIENE_ISSUE_ORDER = ('title', 'assign')
+
+
+def is_valid_mr_title(title):
+    """True if the MR title starts with a bare `TICKET-123: ` prefix."""
+    return bool(MR_TITLE_PATTERN.match(title or ''))
+
+
+def is_ignored_branch(source_branch):
+    """True if the source branch starts with a configured ignored prefix."""
+    branch = source_branch or ''
+    if not IGNORED_BRANCH_PREFIXES:
+        return False
+    return branch.startswith(IGNORED_BRANCH_PREFIXES)
+
+
+def check_mr_hygiene(title, assignees, reviewers):
+    """Returns issue codes in a stable order: 'title', 'assign'."""
+    issues = []
+    if not is_valid_mr_title(title):
+        issues.append('title')
+    if not assignees and not reviewers:
+        issues.append('assign')
+    return issues
+
+
+def suggest_mr_title(title):
+    """Rebuilds a compliant title from a malformed one, for the nag comment."""
+    raw = (title or '').strip()
+    ticket_match = TICKET_RE.search(raw)
+    ticket = ticket_match.group(0) if ticket_match else 'MONO-0000'
+
+    if ':' in raw:
+        description = raw.rsplit(':', 1)[1].strip()
+    else:
+        description = raw.replace(ticket, '').strip(' -:()[]')
+
+    if not description:
+        description = '<опис змін>'
+    return f"{ticket}: {description}"
+
+
+def hygiene_marker(issues):
+    """Hidden marker used to dedupe repeated nag comments on webhook updates."""
+    ordered = [code for code in HYGIENE_ISSUE_ORDER if code in issues]
+    return f"<!-- ai-reviewer:hygiene:{','.join(ordered)} -->"
+
+
+def build_hygiene_comment(issues, title):
+    sections = []
+    if 'title' in issues:
+        sections.append(
+            "**Заголовок MR — сміття.**\n"
+            f"Зараз: `{title}`\n"
+            f"Треба: `{suggest_mr_title(title)}`\n"
+            "Ніяких `fix(...)` / `feat(...)` — тільки ключ задачі, двокрапка, опис. Перейменуй."
+        )
+    if 'assign' in issues:
+        sections.append(
+            "**Ніхто не призначений.**\n"
+            "Ні assignee, ні reviewer. Хто це дивитись буде, святий дух? Признач людей."
+        )
+
+    return (
+        f"{hygiene_marker(issues)}\n"
+        f"## 🤬 {random.choice(meme_phrases)}\n\n"
+        + "\n\n".join(sections)
+    )
+
+
+def has_matching_hygiene_note(note_bodies, issues):
+    """True if an identical set of issues was already reported on this MR."""
+    marker = hygiene_marker(issues)
+    return any(marker in (body or '') for body in note_bodies)
+
+
 # Thread lock to prevent overloading the Mac Mini M4 16GB RAM
 review_lock = threading.Lock()
 
@@ -396,6 +486,36 @@ def _response_looks_truncated(review_text: str, stats: dict) -> bool:
         return True
     return len(review_text) < 80
 
+def post_hygiene_comment(project_id, mr_iid):
+    """Nags about MR title format and missing assignee/reviewer. Never blocks the review."""
+    try:
+        project = gl.projects.get(project_id)
+        mr = project.mergerequests.get(mr_iid)
+        issues = check_mr_hygiene(
+            getattr(mr, 'title', '') or '',
+            getattr(mr, 'assignees', None) or [],
+            getattr(mr, 'reviewers', None) or [],
+        )
+        if not issues:
+            return
+
+        existing = [getattr(note, 'body', '') for note in mr.notes.list(all=True)]
+        if has_matching_hygiene_note(existing, issues):
+            logging.info("Hygiene issues %s already reported on MR !%s", issues, mr_iid)
+            return
+
+        mr.notes.create({'body': build_hygiene_comment(issues, getattr(mr, 'title', '') or '')})
+        logging.info("Hygiene comment posted to MR !%s (issues=%s)", mr_iid, issues)
+    except Exception as e:
+        logging.error(f"Failed to post hygiene comment for MR !{mr_iid}: {e}")
+
+
+def process_merge_request(project_id, mr_iid):
+    """Background entrypoint: hygiene nag first, then the AI review."""
+    post_hygiene_comment(project_id, mr_iid)
+    review_merge_request(project_id, mr_iid)
+
+
 def review_merge_request(project_id, mr_iid):
     """Fetches changes, builds prompt, and posts review to GitLab."""
     with review_lock: # Prevents multiple MRs from crashing the RAM simultaneously
@@ -489,13 +609,13 @@ def webhook():
             if gl:
                 project = gl.projects.get(project_id)
                 mr_obj = project.mergerequests.get(mr_iid)
-                if 'release/' in (getattr(mr_obj, 'source_branch', '') or ''):
-                    return jsonify({'message': 'Ignored release branch'}), 200
+                if is_ignored_branch(getattr(mr_obj, 'source_branch', '') or ''):
+                    return jsonify({'message': 'Ignored branch'}), 200
         except Exception:
             pass
 
         # Fire and Forget Threading
-        thread = threading.Thread(target=review_merge_request, args=(project_id, mr_iid))
+        thread = threading.Thread(target=process_merge_request, args=(project_id, mr_iid))
         thread.start()
         
         return jsonify({'message': 'Review started in background'}), 202
