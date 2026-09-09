@@ -141,6 +141,12 @@ OPENROUTER_VOICE_MAX_TOKENS = env_int(
     "OPENROUTER_VOICE_MAX_TOKENS", REVIEW_MAX_OUTPUT_TOKENS * 3 // 2,
 )
 
+# MR hygiene. The title must carry a bare ticket key so GitLab can link the MR
+# to the issue; `fix(MONO-1628): ...` hides it. A Draft:/WIP: prefix is fine.
+MR_TITLE_PATTERN = os.environ.get(
+    "MR_TITLE_PATTERN", r"^(?:Draft:\s*|WIP:\s*)?[A-Z][A-Z0-9]+-\d+: .+",
+)
+
 # Tone. Off keeps summaries and inline comments dry. On adds a meme to the
 # summary and, when OpenRouter is keyed, rewrites inline findings as
 # Sidorovich. The bugs themselves still come from the local coder model.

@@ -54,7 +54,12 @@ def fd(path, added=1, **kwargs):
 class FakeMR:
     """Placeholder MR object. review_file never reads its attributes directly —
     gitlab_client calls that would need them (post_inline, post_note) are mocked
-    out in the tests below."""
+    out in the tests below. The title and assignee exist only to keep
+    nag_hygiene silent; the nag has its own tests in test_hygiene.py."""
+
+    title = "MONO-1: a change"
+    assignees = [{"username": "dev"}]
+    reviewers = []
 
 
 def _chat_result(text, done_reason="stop"):

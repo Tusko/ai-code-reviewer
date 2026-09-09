@@ -22,6 +22,12 @@ def fd(path, added=1, hunks=None):
 class FakeMR:
     source_branch = "feature/x"
     diff_refs = {"base_sha": "b", "start_sha": "s", "head_sha": "abc1234"}
+    # Hygiene-clean so nag_hygiene stays silent here; the nag has its own
+    # tests in test_hygiene.py.
+    title = "MONO-1: a change"
+    assignees = [{"username": "dev"}]
+    reviewers = []
+
 
 
 class Recorder:

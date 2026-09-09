@@ -53,6 +53,10 @@ class Ledger:
     # like any settled hunk: retrying for ever means every /review replays the
     # whole merge request, and /review resets the budget that would cap it.
     retried: tuple[str, ...] = ()
+    # The hygiene issues most recently reported on this MR, as an issue_key.
+    # Kept here rather than scanned out of the comments so that fixing one of
+    # two problems costs exactly one new nag, and fixing both costs none.
+    hygiene: str = ""
 
     def remaining(self) -> int:
         return max(0, config.MR_COMMENT_BUDGET - self.posted)
@@ -149,6 +153,11 @@ class Ledger:
     def mark_oversized(self) -> "Ledger":
         return replace(self, oversized=True)
 
+    def report_hygiene(self, key: str) -> "Ledger":
+        """Records which hygiene issues the MR has been told about. Empty
+        clears the record, so a relapse is nagged about again."""
+        return replace(self, hygiene=key)
+
     def at_head(self, head: str) -> "Ledger":
         return replace(self, head=head)
 
@@ -163,6 +172,7 @@ def to_marker(value: Ledger) -> str:
         "saturated": value.saturated,
         "retried": list(value.retried),
         "hunks": list(value.hunks),
+        "hygiene": value.hygiene,
     }
     return f"<!-- {MARKER_PREFIX} {json.dumps(payload, separators=(',', ':'))} -->"
 
@@ -238,6 +248,13 @@ def parse_marker(body: str) -> Ledger:
             "state marker field 'retried' must be a list of strings",
         )
 
+    hygiene = payload.get("hygiene", "")
+    if not isinstance(hygiene, str):
+        raise LedgerUnavailable(
+            "state marker field 'hygiene' must be a string, got "
+            f"{type(hygiene).__name__}",
+        )
+
     return Ledger(
         head=head,
         posted=posted,
@@ -247,6 +264,7 @@ def parse_marker(body: str) -> Ledger:
         saturated=saturated,
         hunks=tuple(hunks),
         retried=tuple(retried),
+        hygiene=hygiene,
     )
 
 

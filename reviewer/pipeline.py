@@ -4,7 +4,8 @@ from dataclasses import dataclass, replace
 from typing import Sequence
 
 from reviewer import (
-    config, gitlab_client, ollama_client, openrouter_client, prompt as prompt_mod,
+    config, gitlab_client, hygiene, ollama_client, openrouter_client,
+    prompt as prompt_mod,
 )
 from reviewer.chat_types import FINDING_TAGS, LGTM_TEXT, ChatResult
 from reviewer.diff_parser import FileDiff, Hunk
@@ -509,6 +510,50 @@ def summarize_release_mr(project_id: int, mr_iid: int, mr, force: bool, store) -
     logging.info("MR !%s release/hotfix summarised (%s commits)", mr_iid, len(commits))
 
 
+def nag_hygiene(mr_iid: int, mr, store) -> None:
+    """Comments on the MR's title and assignment before the code is reviewed.
+
+    The issue set is remembered in the ledger rather than re-derived from the
+    comments, so a push that changes nothing costs nothing and fixing one of
+    two problems produces exactly one new comment about the other.
+    """
+    issues = hygiene.check(
+        getattr(mr, "title", "") or "",
+        getattr(mr, "assignees", None) or [],
+        getattr(mr, "reviewers", None) or [],
+    )
+    key = hygiene.issue_key(issues)
+    if key == store.ledger.hygiene:
+        return
+    if not issues:
+        # Cleaned up. Forget it, so a relapse is worth a comment again.
+        store.ledger = store.ledger.report_hygiene("")
+        _save_quietly(store, mr_iid)
+        return
+    if store.ledger.remaining() <= 1:
+        # The last slot belongs to the closing note. A nag that silences the
+        # review's own explanation is a bad trade.
+        logging.warning(
+            "MR !%s: hygiene nag suppressed, MR_COMMENT_BUDGET=%s spent",
+            mr_iid, config.MR_COMMENT_BUDGET,
+        )
+        return
+
+    store.ledger = store.ledger.report_hygiene(key)
+    if not _charge(store, mr_iid):
+        return
+    try:
+        gitlab_client.post_note(mr, hygiene.render(issues, getattr(mr, "title", "") or ""))
+    except Exception as exc:
+        # The slot stays spent — the note may well have landed — but the issue
+        # set is forgotten, so a genuinely lost nag is said again next push.
+        logging.error("MR !%s: hygiene nag could not be posted: %s", mr_iid, exc)
+        store.ledger = store.ledger.report_hygiene("")
+        _save_quietly(store, mr_iid)
+        return
+    logging.info("MR !%s: hygiene nag posted (%s)", mr_iid, key)
+
+
 def mute_merge_request(project_id: int, mr_iid: int) -> None:
     """Silences the bot for one MR. Acknowledged by editing the state note.
 
@@ -548,6 +593,8 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
         if should_skip_branch(getattr(mr, "source_branch", "")):
             summarize_release_mr(project_id, mr_iid, mr, force, store)
             return
+
+        nag_hygiene(mr_iid, mr, store)
 
         file_diffs = gitlab_client.fetch_file_diffs(mr)
         head_sha = (getattr(mr, "diff_refs", None) or {}).get("head_sha", "")

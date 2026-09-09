@@ -42,6 +42,10 @@ class FakeCommit:
 class FakeMR:
     def __init__(self, branch="feature/x", commits=None):
         self.source_branch = branch
+        # Hygiene-clean; the nag has its own tests in test_hygiene.py.
+        self.title = "MONO-1: a change"
+        self.assignees = [{"username": "dev"}]
+        self.reviewers = []
         self.diff_refs = {"base_sha": "b", "start_sha": "s", "head_sha": "h"}
         self.notes_posted = []
         self._commits = commits if commits is not None else [FakeCommit()]

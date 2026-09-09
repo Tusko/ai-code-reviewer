@@ -88,6 +88,31 @@ forget the MR and review it from scratch.
 | A push with new hunks | Reviews only the new hunks. |
 | `MR_COMMENT_BUDGET` (30) comments reached | Posts one closing note and goes quiet until `/review`. |
 | A rebase or force-push | Unchanged hunk content is not re-reviewed. Hunk keys hash content, not line numbers. |
+| A title or assignment problem | Posts one hygiene note (see below). Costs a comment slot like any other note. |
+
+### MR hygiene
+
+Before any code is reviewed the bot audits the merge request itself and, when
+something is wrong, posts one blunt note about it:
+
+*   **Title.** It must start with a bare ticket key — `MONO-1628: reuse browser
+    tabs`. A Conventional Commit wrapper such as `fix(MONO-1628): ...` is
+    rejected: GitLab cannot link that back to the issue. A `Draft:` or `WIP:`
+    prefix in front of the key is allowed. Change the rule with
+    `MR_TITLE_PATTERN` in `.env`.
+*   **Assignment.** An MR with neither an assignee nor a reviewer is nagged.
+    Either one is enough.
+
+The note never involves a model — the checks are local and deterministic, and
+the meme on top comes from the same phrase list as the summary.
+
+Which problems were reported is recorded in the 🔒 state note, not re-derived
+from the comments. A push that changes nothing costs nothing; fixing one of two
+problems produces exactly one new note about the other; fixing everything is
+silent, and a relapse is nagged about again.
+
+`release/` and `hotfix/` branches skip this along with the rest of the review —
+they get the commit roast instead.
 
 ### Commands
 
