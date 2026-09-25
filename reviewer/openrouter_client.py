@@ -26,6 +26,7 @@ def chat(
     history: Sequence[dict] = (),
     model: str | None = None,
     fallback_models: Sequence[str] | None = None,
+    reasoning: dict | None = None,
 ) -> ChatResult:
     """One-shot OpenRouter chat completion.
 
@@ -63,6 +64,8 @@ def chat(
         "top_p": 0.95,
         "max_tokens": max_tokens or config.OPENROUTER_MAX_TOKENS,
     }
+    if reasoning is not None:
+        body["reasoning"] = reasoning
     if fallbacks:
         # OpenRouter walks this list itself when a provider 429s or errors, so
         # one request already survives a saturated pool.
@@ -104,6 +107,10 @@ def review_chat(system: str, user: str, deadline_s: int) -> ChatResult:
     exposes no seed, so identical diffs may now yield slightly different
     findings. The ledger dedupes on diff content, not on review text, so this
     does not cause repeat comments.
+
+    Sonnet 5 turns adaptive thinking on at effort `high` unless told otherwise.
+    Thinking tokens are billed as output and will eat REVIEW_MAX_OUTPUT_TOKENS
+    before a finding is written, so review calls disable it.
     """
     return chat(
         system,
@@ -113,6 +120,7 @@ def review_chat(system: str, user: str, deadline_s: int) -> ChatResult:
         max_tokens=config.REVIEW_MAX_OUTPUT_TOKENS,
         model=config.OPENROUTER_REVIEW_MODEL,
         fallback_models=config.OPENROUTER_REVIEW_FALLBACK_MODELS,
+        reasoning={"enabled": False},
     )
 
 

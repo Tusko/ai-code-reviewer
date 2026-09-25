@@ -113,8 +113,11 @@ SIDOROVICH_OLLAMA_FALLBACK = env_bool("SIDOROVICH_OLLAMA_FALLBACK", False)
 
 # Review backend. Ollama no longer serves the review path; it remains only as
 # the optional Sidorovich voice fallback above.
+# Sonnet 5 is the cost/quality pick for this one-shot, hunk-only review.
+# review_chat disables its default adaptive thinking — leave that on and the
+# 4096-token output cap is spent on hidden reasoning, then the finding truncates.
 OPENROUTER_REVIEW_MODEL = paid_model(
-    os.environ.get("OPENROUTER_REVIEW_MODEL", "poolside/laguna-s-2.1"),
+    os.environ.get("OPENROUTER_REVIEW_MODEL", "anthropic/claude-sonnet-5"),
 )
 # Extra models tried in order after OPENROUTER_REVIEW_MODEL within one request.
 # Empty by default: a paid model already reroutes across providers on its own.

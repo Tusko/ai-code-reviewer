@@ -88,13 +88,14 @@ def test_no_meme_phrase_was_glued_by_a_missing_comma():
 
 def test_openrouter_defaults(monkeypatch):
     for key in ("OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_BASE_URL",
-                "OPENROUTER_MAX_TOKENS"):
+                "OPENROUTER_MAX_TOKENS", "OPENROUTER_REVIEW_MODEL"):
         monkeypatch.delenv(key, raising=False)
     cfg = _reload(monkeypatch)
     assert cfg.OPENROUTER_API_KEY is None
     assert cfg.OPENROUTER_MODEL == "google/gemini-2.5-flash-lite"
     assert cfg.OPENROUTER_BASE_URL == "https://openrouter.ai/api/v1"
     assert cfg.OPENROUTER_MAX_TOKENS == 1024
+    assert cfg.OPENROUTER_REVIEW_MODEL == "anthropic/claude-sonnet-5"
 
 
 def test_openrouter_env_overrides(monkeypatch):

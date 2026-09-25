@@ -17,7 +17,7 @@ class FakeResponse:
                 {"message": {"content": self._content}, "finish_reason": "stop"},
             ],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-            "model": "poolside/laguna-s-2.1",
+            "model": "anthropic/claude-sonnet-5",
         }
 
 
@@ -37,10 +37,10 @@ def captured(monkeypatch):
 
 
 def test_review_chat_uses_review_model(captured, monkeypatch):
-    monkeypatch.setattr("reviewer.config.OPENROUTER_REVIEW_MODEL", "poolside/laguna-s-2.1")
+    monkeypatch.setattr("reviewer.config.OPENROUTER_REVIEW_MODEL", "anthropic/claude-sonnet-5")
     monkeypatch.setattr("reviewer.config.OPENROUTER_MODEL", "voice/model")
     openrouter_client.review_chat("sys", "user", 30)
-    assert captured["body"]["model"] == "poolside/laguna-s-2.1"
+    assert captured["body"]["model"] == "anthropic/claude-sonnet-5"
 
 
 def test_review_chat_uses_review_output_cap(captured, monkeypatch):
@@ -57,13 +57,13 @@ def test_review_chat_omits_models_key_when_no_fallbacks(captured, monkeypatch):
 
 
 def test_review_chat_sends_fallback_chain(captured, monkeypatch):
-    monkeypatch.setattr("reviewer.config.OPENROUTER_REVIEW_MODEL", "poolside/laguna-s-2.1")
+    monkeypatch.setattr("reviewer.config.OPENROUTER_REVIEW_MODEL", "anthropic/claude-sonnet-5")
     monkeypatch.setattr(
-        "reviewer.config.OPENROUTER_REVIEW_FALLBACK_MODELS", ["poolside/laguna-xs-2.1"],
+        "reviewer.config.OPENROUTER_REVIEW_FALLBACK_MODELS", ["poolside/laguna-s-2.1"],
     )
     openrouter_client.review_chat("sys", "user", 30)
     assert captured["body"]["models"] == [
-        "poolside/laguna-s-2.1", "poolside/laguna-xs-2.1",
+        "anthropic/claude-sonnet-5", "poolside/laguna-s-2.1",
     ]
 
 
@@ -72,11 +72,19 @@ def test_review_chat_is_low_temperature(captured):
     assert captured["body"]["temperature"] == 0.1
 
 
+def test_review_chat_disables_adaptive_thinking(captured):
+    """Sonnet 5 thinks at effort high unless told not to. Those tokens are
+    billed as output and will exhaust REVIEW_MAX_OUTPUT_TOKENS first."""
+    openrouter_client.review_chat("sys", "user", 30)
+    assert captured["body"]["reasoning"] == {"enabled": False}
+
+
 def test_voice_chat_still_uses_voice_model(captured, monkeypatch):
     monkeypatch.setattr("reviewer.config.OPENROUTER_MODEL", "voice/model")
-    monkeypatch.setattr("reviewer.config.OPENROUTER_REVIEW_MODEL", "poolside/laguna-s-2.1")
+    monkeypatch.setattr("reviewer.config.OPENROUTER_REVIEW_MODEL", "anthropic/claude-sonnet-5")
     openrouter_client.chat("sys", "user", 30)
     assert captured["body"]["model"] == "voice/model"
+    assert "reasoning" not in captured["body"]
 
 
 def test_review_chat_without_key_reports_error(monkeypatch):
