@@ -265,6 +265,12 @@ After two (`VOICE_FAILURE_LIMIT` in `reviewer/voice.py`, not configurable) conse
 limits, mostly) the rest of that MR stays dry, so one merge request never
 mixes voiced and dry comments. `SNARK=false` keeps comments professional.
 
+The voice is rationed: at most one swear per paragraph, never as the first
+word, and aimed at the code rather than at the author. Each finding is also
+handed an opening phrase drawn from `review_openers` in `reviewer/memes.py`,
+picked deterministically from the finding's own text — otherwise the model
+opened nearly every comment on the same swear.
+
 Two situations skip a **full** file-by-file review:
 
 *   The merge request's source branch starts with `release/` or `hotfix/`.

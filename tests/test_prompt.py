@@ -2,12 +2,15 @@ from reviewer import config
 from reviewer import prompt as prompt_mod
 from reviewer.diff_parser import Hunk
 from reviewer.memes import (
-    closer_for, opener_for, sidorovich_closers, sidorovich_openers,
+    closer_for, opener_for, review_opener_for, review_openers,
+    sidorovich_closers, sidorovich_openers,
 )
 from reviewer.prompt import (
-    SYSTEM_PROMPT, SIDOROVICH_SYSTEM_PROMPT, SIDOROVICH_REVIEW_VOICE_PROMPT,
+    SYSTEM_PROMPT, SIDOROVICH_RESTRAINT, SIDOROVICH_SYSTEM_PROMPT,
+    SIDOROVICH_REVIEW_VOICE_PROMPT,
     build_commit_summary_prompt,
-    build_file_prompt, estimate_tokens, extract_ticket_key, fits,
+    build_file_prompt, build_review_voice_prompt, estimate_tokens,
+    extract_ticket_key, fits,
     has_foreign_script, input_token_budget, looks_too_russian,
     render_hunk, unusable_language,
 )
@@ -270,6 +273,65 @@ def test_has_foreign_script_ignores_fenced_code():
     losing the finding's code over it is worse than the leak."""
     assert not has_foreign_script(
         'Полагодь це:\n```python\nGREETING = "مرحبا"\n```\nІ не пхай більше.'
+    )
+
+
+def test_the_review_voice_no_longer_mandates_a_swear_opener():
+    """"Починай з матюка або іронії" opened all but a handful of shipped
+    findings on the same two words."""
+    assert "Починай з матюка" not in SIDOROVICH_REVIEW_VOICE_PROMPT
+
+
+def test_the_worn_out_finding_openers_are_banned():
+    for tic in ("Якого хуя", "Шо за хуйня", "Ну і нахуя"):
+        assert tic in SIDOROVICH_REVIEW_VOICE_PROMPT, f"{tic!r} must be named as banned"
+
+
+def test_both_sidorovich_prompts_ration_the_swearing():
+    for text in (SIDOROVICH_SYSTEM_PROMPT, SIDOROVICH_REVIEW_VOICE_PROMPT):
+        assert SIDOROVICH_RESTRAINT in text
+
+
+def test_the_restraint_rule_aims_the_abuse_at_the_code():
+    assert "не в людину" in SIDOROVICH_RESTRAINT
+    assert "один матюк на абзац" in SIDOROVICH_RESTRAINT
+    for slur in ("дебіл", "ідіот", "руки з жопи"):
+        assert slur in SIDOROVICH_RESTRAINT, f"{slur!r} must be named as banned"
+
+
+def test_build_review_voice_prompt_injects_the_opener_and_keeps_the_review():
+    text = build_review_voice_prompt("**🔴 [BLOCKER]** boom", opener="Отут стоп.")
+    assert "«Отут стоп.»" in text
+    assert "**🔴 [BLOCKER]** boom" in text
+
+
+def test_build_review_voice_prompt_without_opener_passes_the_review_through():
+    assert build_review_voice_prompt("**🔴 [BLOCKER]** boom") == "**🔴 [BLOCKER]** boom"
+
+
+def test_review_opener_for_is_deterministic_and_spread():
+    assert review_opener_for("**🔴 [BLOCKER]** boom") == review_opener_for(
+        "**🔴 [BLOCKER]** boom"
+    )
+    seen = {review_opener_for(f"finding-{i}") for i in range(400)}
+    assert len(seen) > len(review_openers) * 0.8, (
+        f"only {len(seen)} of {len(review_openers)} openers ever chosen"
+    )
+
+
+def test_no_review_opener_is_a_swear():
+    """The point of the bank is variety without volume."""
+    for opener in review_openers:
+        assert not looks_too_russian(opener), opener
+        assert not any(
+            bad in opener.lower() for bad in ("хуй", "хуя", "бля", "єба", "пизд")
+        ), opener
+
+
+def test_review_and_roast_openers_rotate_independently():
+    pairs = {(opener_for(f"s{i}"), review_opener_for(f"s{i}")) for i in range(600)}
+    assert len(pairs) > len(sidorovich_openers) * 3, (
+        f"only {len(pairs)} distinct roast/review opener pairs"
     )
 
 

@@ -211,3 +211,49 @@ def closer_for(seed: str) -> str:
     """One closing move, deterministic on seed. See opener_for."""
     digest = hashlib.sha256((seed or "").encode()).digest()
     return sidorovich_closers[digest[1] % len(sidorovich_closers)]
+
+
+# Openers for one inline finding. "Починай з матюка або іронії" did to review
+# comments exactly what it did to the release roast: near every finding opened
+# on "Якого хуя". Same fix, separate bank — a finding gets one short paragraph,
+# so these are shorter and calmer than the roast openers.
+review_openers = [
+    "Отут стоп.",
+    "Так, дивимось.",
+    "Ну от нащо.",
+    "Оце цікаво придумано.",
+    "Ага, класика.",
+    "Тут халепа.",
+    "Тю, а це шо?",
+    "Дивись сюди.",
+    "Не вийде так.",
+    "Отакої.",
+    "Сюрприз буде на проді.",
+    "Хвилиночку.",
+    "Ні.",
+    "Серйозно?",
+    "Оце вже гірше.",
+    "Знайшов.",
+    "Опа, приїхали.",
+    "Читаю і не вірю.",
+    "От тут і закопано.",
+    "Це впаде.",
+    "Молодець, але ні.",
+    "Ще один такий.",
+    "Гарна спроба.",
+    "Так, а тепер серйозно.",
+    "Тримай себе в руках.",
+    "Ой лишенько.",
+    "Ну добре, розберемо.",
+    "Шкода.",
+]
+
+
+def review_opener_for(seed: str) -> str:
+    """One inline-finding opener, deterministic on seed. See opener_for.
+
+    Reads a different digest byte than the roast opener so a run that seeds
+    both does not pin one to the other.
+    """
+    digest = hashlib.sha256((seed or "").encode()).digest()
+    return review_openers[digest[2] % len(review_openers)]

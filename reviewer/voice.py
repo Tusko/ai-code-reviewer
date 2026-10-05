@@ -4,6 +4,7 @@ from typing import Sequence
 
 from reviewer import config, openrouter_client, prompt as prompt_mod
 from reviewer.chat_types import FINDING_TAGS, ChatResult
+from reviewer.memes import review_opener_for
 
 VOICE_DEADLINE_S = 20
 # Consecutive failed voice calls before the rest of the MR stays dry. Free-tier
@@ -73,12 +74,16 @@ def flavor_review(text: str, voice: "VoiceState | None" = None) -> str:
     if voice is not None and not voice.enabled:
         return text
 
+    # Seeded on the finding itself: deterministic, so the Ukrainian retry
+    # replays the same request, and different per finding, so two comments in
+    # one merge request do not open on the same phrase.
+    user = prompt_mod.build_review_voice_prompt(text, opener=review_opener_for(text))
     result = prefer_ukrainian(
-        _voice_chat(text),
+        _voice_chat(user),
         lambda bad: _voice_chat(
             prompt_mod.SIDOROVICH_UKRAINIAN_RETRY,
             history=(
-                {"role": "user", "content": text},
+                {"role": "user", "content": user},
                 {"role": "assistant", "content": bad},
             ),
         ),
