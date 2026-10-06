@@ -1,7 +1,8 @@
 import logging
+import re
 import time
 from dataclasses import dataclass, replace
-from typing import Sequence
+from typing import Callable, Sequence
 
 from reviewer import (
     config, gitlab_client, hygiene, ollama_client, openrouter_client,
@@ -63,6 +64,10 @@ dedupe = DedupeCache()
 
 SKIP_BRANCH_PREFIXES = ("release/", "hotfix/")
 
+# A finding heading, and the `(line N)` the prompt asks the model to end it with.
+FINDING_HEADING_RE = re.compile(r"^.*\[(?:BLOCKER|SUGGESTION|NIT)\].*$", re.MULTILINE)
+FINDING_LINE_RE = re.compile(r"\s*\(\s*line\s+(\d+)\s*\)", re.IGNORECASE)
+
 
 def should_skip_branch(branch: str) -> bool:
     branch = branch or ""
@@ -87,14 +92,8 @@ def partition_reviewable(
 def select_files(
     reviewable: Sequence[FileDiff], skipped: Sequence[FileOutcome] = (),
 ) -> tuple[list[FileDiff], list[FileOutcome]]:
-    """Applies the per-run MAX_FILES cap, smallest files first."""
-    outcomes = list(skipped)
-    kept = sorted(reviewable, key=lambda f: f.total_lines)
-    if len(kept) > config.MAX_FILES:
-        for fd in kept[config.MAX_FILES:]:
-            outcomes.append(FileOutcome(fd.new_path, "skipped", "over MAX_FILES limit"))
-        kept = kept[: config.MAX_FILES]
-    return kept, outcomes
+    """Orders files smallest first, so the MR deadline cuts the largest."""
+    return sorted(reviewable, key=lambda f: f.total_lines), list(skipped)
 
 
 def drop_known_hunks(
@@ -157,7 +156,13 @@ def review_file(
     context: str,
     voice: "VoiceState | None" = None,
     review_state: "ReviewState | None" = None,
+    charge: "Callable[[], bool] | None" = None,
 ) -> FileOutcome:
+    """Reviews one file and posts each finding on the line it is about.
+
+    The caller has paid for one comment. Every further one is bought through
+    `charge`; once it says no, the remaining findings ride in the last comment.
+    """
     path = file_diff.new_path
     ladder = build_prompt_ladder(path, file_diff.hunks, context)
     attempts = [(level, text) for level, text in ladder if prompt_mod.fits(text)]
@@ -184,7 +189,7 @@ def review_file(
                 f"{missing} {hunk_word} {verb} context budget"
             )
 
-    bodies: list[str] = []
+    findings: list[tuple[int | None, str, bool]] = []
     truncated = False
     for text in prompts:
         result = review_chat(
@@ -205,24 +210,51 @@ def review_file(
         if result.done_reason == "length":
             truncated = True
         if result.text and not is_lgtm(result.text):
-            finding = result.text
-            if result.done_reason != "length":
-                finding = flavor_review(finding, voice)
-            bodies.append(finding)
+            dry = result.done_reason == "length"
+            findings.extend(
+                (line, text, dry) for line, text in split_findings(result.text)
+            )
 
-    if not bodies:
+    if not findings:
         return FileOutcome(path, "clean", l2_detail)
 
-    body = f"### 📄 `{path}`\n\n" + "\n\n".join(bodies)
+    added = sorted(n for h in file_diff.hunks for n, _ in h.added_lines())
+    groups: dict[int | None, list[tuple[str, bool]]] = {}
+    for line, text, dry in findings:
+        groups.setdefault(snap_to_added(line, added), []).append((text, dry))
+
+    comments: list[tuple[int | None, str]] = []
+    for anchor, items in groups.items():
+        text = "\n\n".join(t for t, _ in items)
+        if not any(dry for _, dry in items):
+            text = flavor_review(text, voice)
+        comments.append((anchor, text))
+
+    slots = 1
+    while slots < len(comments) and (charge is None or charge()):
+        slots += 1
+    if slots < len(comments):
+        # Out of budget: the leftovers ride in the last comment, labelled with
+        # the line each one is about, rather than being dropped.
+        tail = comments[slots - 1:]
+        comments = comments[:slots - 1] + [(tail[0][0], "\n\n".join(
+            f"_Рядок {anchor}:_\n\n{text}" if anchor is not None else text
+            for anchor, text in tail
+        ))]
     if truncated:
-        body += "\n\n_⚠️ This review was truncated at the output token limit and may be incomplete._"
-    anchor = file_diff.hunks[0].first_added_line()
+        last_anchor, last_text = comments[-1]
+        comments[-1] = (last_anchor, last_text + (
+            "\n\n_⚠️ This review was truncated at the output token limit "
+            "and may be incomplete._"
+        ))
+
     try:
-        posted = False
-        if anchor is not None:
-            posted = gitlab_client.post_inline(mr, path, anchor, body)
-        if not posted:
-            gitlab_client.post_note(mr, body)
+        for anchor, text in comments:
+            posted = False
+            if anchor is not None:
+                posted = gitlab_client.post_inline(mr, path, anchor, text)
+            if not posted:
+                gitlab_client.post_note(mr, f"### 📄 `{path}`\n\n{text}")
     except Exception as exc:
         # post_inline only catches GitlabError; a connection reset while reading
         # the response of a discussion GitLab already created escapes it. The
@@ -234,10 +266,43 @@ def review_file(
             path, "reviewed", f"could not be posted ({exc})", settled=False,
         )
 
-    detail = l2_detail if l2_detail else f"{len(bodies)} response(s)"
+    detail = l2_detail if l2_detail else f"{len(comments)} comment(s)"
     if truncated:
         detail += ", truncated at output token limit"
     return FileOutcome(path, "reviewed", detail)
+
+
+def split_findings(text: str) -> list[tuple[int | None, str]]:
+    """Cuts a review into (line, finding) pairs, the `(line N)` removed.
+
+    Anything before the first heading stays with it, and a reply with no
+    heading at all is one finding with no line.
+    """
+    starts = [m.start() for m in FINDING_HEADING_RE.finditer(text)]
+    if not starts:
+        return [(None, text.strip())]
+    starts[0] = 0
+    out = []
+    for begin, end in zip(starts, starts[1:] + [len(text)]):
+        chunk = text[begin:end].strip()
+        heading = FINDING_HEADING_RE.search(chunk)
+        match = FINDING_LINE_RE.search(heading.group())
+        line = int(match.group(1)) if match else None
+        if match:
+            fixed = heading.group().replace(match.group(), "", 1)
+            chunk = chunk[:heading.start()] + fixed + chunk[heading.end():]
+        out.append((line, chunk))
+    return out
+
+
+def snap_to_added(line: int | None, added: Sequence[int]) -> int | None:
+    """The added line closest to `line`. GitLab only takes a new_line alone
+    on an added line, and the model sometimes names a context line."""
+    if not added:
+        return None
+    if line is None:
+        return added[0]
+    return min(added, key=lambda n: (abs(n - line), n))
 
 
 def is_lgtm(text: str) -> bool:
@@ -688,7 +753,11 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 break
 
             try:
-                outcome = review_file(mr, file_diff, context, voice, review_state)
+                outcome = review_file(
+                    mr, file_diff, context, voice, review_state,
+                    # The last slot stays reserved for the closing note.
+                    charge=lambda: store.ledger.remaining() > 1 and _charge(store, mr_iid),
+                )
             except Exception as exc:
                 logging.error("Review failed for %s: %s", file_diff.new_path, exc)
                 outcomes.append(FileOutcome(file_diff.new_path, "error", str(exc)[:120]))

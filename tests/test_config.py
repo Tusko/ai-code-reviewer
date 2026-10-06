@@ -31,13 +31,12 @@ def _reload(monkeypatch, **env):
 
 def test_defaults_match_16gb_tuning(monkeypatch):
     for key in ("OLLAMA_NUM_CTX", "OLLAMA_NUM_PREDICT", "OLLAMA_NUM_BATCH",
-                "INCLUDE_FILE_CONTEXT", "CONTEXT_WINDOW", "MAX_FILES"):
+                "INCLUDE_FILE_CONTEXT", "CONTEXT_WINDOW"):
         monkeypatch.delenv(key, raising=False)
     cfg = _reload(monkeypatch)
     assert cfg.OLLAMA_NUM_CTX == 8192
     assert cfg.OLLAMA_NUM_PREDICT == 320
     assert cfg.OLLAMA_NUM_BATCH == 512
-    assert cfg.MAX_FILES == 40
 
 
 def test_file_context_is_sized_for_the_review_backend(monkeypatch):

@@ -236,7 +236,57 @@ def test_review_file_falls_back_to_note_when_inline_rejected(monkeypatch):
     assert outcome.status == "reviewed"
     assert len(inline_calls) == 1
     assert len(note_calls) == 1
-    assert note_calls[0][1] == inline_calls[0][3]
+    assert note_calls[0][1] == "### 📄 `a.py`\n\n" + inline_calls[0][3]
+
+
+def test_review_file_posts_each_finding_on_its_own_line(monkeypatch):
+    """One comment per file pinned to the first added line put a finding
+    about line 40 on an import at line 1."""
+    reply = (
+        "**🟡 [SUGGESTION]** (line 3)\nBad key.\n\n"
+        "**🔵 [NIT]** (line 5)\nOff by one.\n\n"
+        "**🔴 [BLOCKER]** (Line 3)\nAlso bad."
+    )
+    monkeypatch.setattr(pipeline, "review_chat",
+                        lambda system, user, deadline_s: _chat_result(reply))
+    inline = []
+    monkeypatch.setattr(pipeline.gitlab_client, "post_inline",
+                        lambda mr, path, line, body: inline.append((line, body)) or True)
+    monkeypatch.setattr(pipeline.gitlab_client, "post_note", lambda *a: None)
+
+    outcome = review_file(FakeMR(), fd("a.py", added=5), context="", charge=lambda: True)
+
+    assert outcome.status == "reviewed"
+    assert [line for line, _ in inline] == [3, 5]
+    assert "Bad key." in inline[0][1] and "Also bad." in inline[0][1]
+    assert "(line" not in inline[0][1].lower()
+
+
+def test_review_file_snaps_a_line_to_the_nearest_added_one(monkeypatch):
+    monkeypatch.setattr(pipeline, "review_chat", lambda system, user, deadline_s:
+                        _chat_result("**🔴 [BLOCKER]** (line 99)\nbad"))
+    inline = []
+    monkeypatch.setattr(pipeline.gitlab_client, "post_inline",
+                        lambda mr, path, line, body: inline.append(line) or True)
+
+    review_file(FakeMR(), fd("a.py", added=3), context="")
+
+    assert inline == [4]
+
+
+def test_review_file_folds_findings_it_cannot_pay_for(monkeypatch):
+    reply = "**🔴 [BLOCKER]** (line 2)\nfirst\n\n**🔵 [NIT]** (line 4)\nsecond"
+    monkeypatch.setattr(pipeline, "review_chat",
+                        lambda system, user, deadline_s: _chat_result(reply))
+    inline = []
+    monkeypatch.setattr(pipeline.gitlab_client, "post_inline",
+                        lambda mr, path, line, body: inline.append((line, body)) or True)
+
+    review_file(FakeMR(), fd("a.py", added=3), context="", charge=lambda: False)
+
+    assert len(inline) == 1
+    assert inline[0][0] == 2
+    assert "first" in inline[0][1] and "_Рядок 4:_" in inline[0][1]
 
 
 def test_review_file_marks_truncated_response_but_still_posts(monkeypatch):
@@ -577,19 +627,11 @@ def test_select_files_carries_skip_outcomes_through():
     assert any(o.detail == "lockfile" for o in outcomes)
 
 
-def test_select_files_caps_at_max_files(monkeypatch):
-    monkeypatch.setattr("reviewer.config.MAX_FILES", 2)
-    files = [fd(f"f{i}.py", added=i + 1) for i in range(5)]
+def test_select_files_has_no_file_cap():
+    files = [fd(f"f{i}.py", added=i + 1) for i in range(50)]
     kept, outcomes = select_files(files, [])
-    assert len(kept) == 2
-    assert sum(1 for o in outcomes if o.detail == "over MAX_FILES limit") == 3
-
-
-def test_select_files_keeps_smallest_first(monkeypatch):
-    monkeypatch.setattr("reviewer.config.MAX_FILES", 2)
-    files = [fd("big.py", added=9), fd("small.py", added=1), fd("mid.py", added=4)]
-    kept, _ = select_files(files, [])
-    assert [f.new_path for f in kept] == ["small.py", "mid.py"]
+    assert len(kept) == 50
+    assert outcomes == []
 
 
 def test_the_ladder_sends_the_whole_file_first(monkeypatch):

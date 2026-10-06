@@ -236,7 +236,6 @@ SNARK=true
 # Deadlines and limits.
 PER_FILE_TIMEOUT_S=90
 MR_TIMEOUT_S=480
-MAX_FILES=40
 QUEUE_MAXSIZE=32
 ```
 

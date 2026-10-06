@@ -175,7 +175,7 @@ def _clean_review(monkeypatch):
     """Stubs review_file at the real 5-arg signature, always returning clean."""
     monkeypatch.setattr(
         "reviewer.pipeline.review_file",
-        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+        lambda mr, file_diff, context, voice, review_state, **_: pipeline.FileOutcome(
             file_diff.new_path, "clean", "",
         ),
     )
@@ -415,7 +415,7 @@ def test_a_refunded_slot_is_not_charged_twice(harness, monkeypatch):
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
     monkeypatch.setattr(
         "reviewer.pipeline.review_file",
-        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+        lambda mr, file_diff, context, voice, review_state, **_: pipeline.FileOutcome(
             file_diff.new_path, "clean", "",
         ),
     )
@@ -539,7 +539,7 @@ def test_a_file_that_fails_before_posting_gives_its_slot_back(harness, monkeypat
     recorder, state = harness
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
 
-    def _dies_early(mr, file_diff, context, voice, review_state):
+    def _dies_early(mr, file_diff, context, voice, review_state, **_):
         raise RuntimeError("blew up building the prompt")
 
     monkeypatch.setattr("reviewer.pipeline.review_file", _dies_early)
@@ -659,7 +659,7 @@ def test_a_refund_returns_exactly_what_was_charged(harness, monkeypatch):
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
     calls = {"n": 0}
 
-    def _one_good_then_boom(mr, file_diff, context, voice, review_state):
+    def _one_good_then_boom(mr, file_diff, context, voice, review_state, **_):
         calls["n"] += 1
         if calls["n"] == 1:
             recorder.inline.append((file_diff.new_path, "finding"))
@@ -828,7 +828,7 @@ def test_an_outage_that_raises_costs_nothing_either(harness, monkeypatch):
     recorder, state = harness
     monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
 
-    def _raises(mr, file_diff, context, voice, review_state):
+    def _raises(mr, file_diff, context, voice, review_state, **_):
         raise RuntimeError("the client blew up")
 
     monkeypatch.setattr("reviewer.pipeline.review_file", _raises)
@@ -871,7 +871,7 @@ def test_a_long_lived_mr_does_not_go_blind_on_dead_keys(harness, monkeypatch):
     monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 40)
     monkeypatch.setattr(
         "reviewer.pipeline.review_file",
-        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+        lambda mr, file_diff, context, voice, review_state, **_: pipeline.FileOutcome(
             file_diff.new_path, "clean", "",
         ),
     )
@@ -912,7 +912,7 @@ def test_saturation_is_announced_once_per_transition(harness, monkeypatch):
     monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
     monkeypatch.setattr(
         "reviewer.pipeline.review_file",
-        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+        lambda mr, file_diff, context, voice, review_state, **_: pipeline.FileOutcome(
             file_diff.new_path, "clean", "",
         ),
     )
@@ -953,7 +953,7 @@ def test_the_saturation_note_is_charged_like_any_other_comment(harness, monkeypa
     monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
     monkeypatch.setattr(
         "reviewer.pipeline.review_file",
-        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+        lambda mr, file_diff, context, voice, review_state, **_: pipeline.FileOutcome(
             file_diff.new_path, "clean", "",
         ),
     )
@@ -1016,7 +1016,7 @@ def test_review_on_a_saturated_mr_does_not_claim_it_saw_everything(
     monkeypatch.setattr("reviewer.config.LEDGER_MAX_HUNKS", 4)
     monkeypatch.setattr(
         "reviewer.pipeline.review_file",
-        lambda mr, file_diff, context, voice, review_state: pipeline.FileOutcome(
+        lambda mr, file_diff, context, voice, review_state, **_: pipeline.FileOutcome(
             file_diff.new_path, "clean", "",
         ),
     )

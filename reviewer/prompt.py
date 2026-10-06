@@ -30,6 +30,9 @@ the problem in plain prose and then a `*Fix:*` fenced code block:
 **🟡 [SUGGESTION]** — logic bug, unhandled edge case, or N+1 query
 **🔵 [NIT]** — data validation, safer SQL, or stricter type casting ONLY
 
+End every heading with the number of the `+` line the finding is about, taken
+from the left column of the changed lines: `**🟡 [SUGGESTION]** (line 42)`.
+
 If and ONLY if the code has no logic or security issues, output EXACTLY:
 [LGTM]
 """
