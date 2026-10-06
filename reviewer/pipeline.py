@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Callable, Sequence
 
@@ -150,6 +151,14 @@ def build_prompt_ladder(path: str, hunks: Sequence[Hunk], context: str) -> list[
     return ladder
 
 
+@dataclass(frozen=True)
+class Draft:
+    """A file's findings, voiced and anchored, not yet posted."""
+    comments: tuple[tuple[int | None, str], ...]
+    truncated: bool
+    detail: str
+
+
 def review_file(
     mr,
     file_diff: FileDiff,
@@ -157,12 +166,29 @@ def review_file(
     voice: "VoiceState | None" = None,
     review_state: "ReviewState | None" = None,
     charge: "Callable[[], bool] | None" = None,
+    draft: "Future | None" = None,
 ) -> FileOutcome:
     """Reviews one file and posts each finding on the line it is about.
 
-    The caller has paid for one comment. Every further one is bought through
-    `charge`; once it says no, the remaining findings ride in the last comment.
+    `draft` is draft_file already running on a worker; without it the file is
+    drafted here. Posting stays on the caller's thread either way.
     """
+    result = draft.result() if draft is not None else draft_file(
+        file_diff, context, voice, review_state,
+    )
+    if isinstance(result, FileOutcome):
+        return result
+    return post_draft(mr, file_diff.new_path, result, charge)
+
+
+def draft_file(
+    file_diff: FileDiff,
+    context: str,
+    voice: "VoiceState | None" = None,
+    review_state: "ReviewState | None" = None,
+) -> "Draft | FileOutcome":
+    """Everything slow about a file: the review call and the voice. Touches
+    neither GitLab nor the ledger, so files can be drafted side by side."""
     path = file_diff.new_path
     ladder = build_prompt_ladder(path, file_diff.hunks, context)
     attempts = [(level, text) for level, text in ladder if prompt_mod.fits(text)]
@@ -230,6 +256,18 @@ def review_file(
             text = flavor_review(text, voice)
         comments.append((anchor, text))
 
+    detail = l2_detail if l2_detail else f"{len(comments)} comment(s)"
+    if truncated:
+        detail += ", truncated at output token limit"
+    return Draft(tuple(comments), truncated, detail)
+
+
+def post_draft(
+    mr, path: str, draft: Draft, charge: "Callable[[], bool] | None" = None,
+) -> FileOutcome:
+    """Posts a draft. The caller has paid for one comment. Every further one is
+    bought through `charge`; once it says no, the rest ride in the last one."""
+    comments = list(draft.comments)
     slots = 1
     while slots < len(comments) and (charge is None or charge()):
         slots += 1
@@ -241,7 +279,7 @@ def review_file(
             f"_Рядок {anchor}:_\n\n{text}" if anchor is not None else text
             for anchor, text in tail
         ))]
-    if truncated:
+    if draft.truncated:
         last_anchor, last_text = comments[-1]
         comments[-1] = (last_anchor, last_text + (
             "\n\n_⚠️ This review was truncated at the output token limit "
@@ -266,10 +304,7 @@ def review_file(
             path, "reviewed", f"could not be posted ({exc})", settled=False,
         )
 
-    detail = l2_detail if l2_detail else f"{len(comments)} comment(s)"
-    if truncated:
-        detail += ", truncated at output token limit"
-    return FileOutcome(path, "reviewed", detail)
+    return FileOutcome(path, "reviewed", draft.detail)
 
 
 def split_findings(text: str) -> list[tuple[int | None, str]]:
@@ -714,26 +749,19 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
         voice = VoiceState()
         review_state = ReviewState()
 
-        for file_diff in kept:
+        def draft_job(file_diff: FileDiff) -> "Draft | FileOutcome":
+            # The same gates the loop below applies, checked again when the
+            # worker picks the file up, so a run that has already stopped does
+            # not keep paying for reviews nobody will post.
             if time.monotonic() - started > config.MR_TIMEOUT_S:
-                outcomes.append(FileOutcome(
-                    file_diff.new_path, "skipped",
-                    f"MR deadline of {config.MR_TIMEOUT_S}s reached",
-                ))
-                continue
+                return FileOutcome(file_diff.new_path, "skipped",
+                                   f"MR deadline of {config.MR_TIMEOUT_S}s reached")
             if not review_state.open:
-                outcomes.append(FileOutcome(
-                    file_diff.new_path, "skipped", "review backend rate limited",
-                ))
-                continue
+                return FileOutcome(file_diff.new_path, "skipped",
+                                   "review backend rate limited")
             if store.ledger.remaining() <= 1:
-                # The last slot is reserved for the closing note, so the run can
-                # always tell the reader why it stopped.
-                outcomes.append(FileOutcome(
-                    file_diff.new_path, "skipped", "MR comment budget reached",
-                ))
-                continue
-
+                return FileOutcome(file_diff.new_path, "skipped",
+                                   "MR comment budget reached")
             context = ""
             if config.INCLUDE_FILE_CONTEXT:
                 # The whole file, not a pre-cut window: the ladder decides how
@@ -741,64 +769,106 @@ def review_merge_request(project_id: int, mr_iid: int, force: bool = False) -> N
                 context = gitlab_client.fetch_file_content(
                     project, file_diff.new_path, mr.source_branch,
                 )
+            return draft_file(file_diff, context, voice, review_state)
 
-            # Charged before review_file posts anything, and refunded below if
-            # it turns out nothing was posted. Saved per file, not once at the
-            # end: a crash mid-run would otherwise leave comments posted but
-            # unrecorded, and the next push would post every one of them again.
-            if not _charge(store, mr_iid):
-                outcomes.append(FileOutcome(
-                    file_diff.new_path, "skipped", "review state could not be saved",
-                ))
-                break
+        # Workers only draft. Charging, posting and the ledger stay on this
+        # thread, in file order, exactly as when review was sequential. The
+        # window is kept REVIEW_CONCURRENCY files ahead of the loop rather than
+        # submitting the lot, so a run that stops early wastes at most that
+        # many reviews.
+        pool = ThreadPoolExecutor(max_workers=config.REVIEW_CONCURRENCY)
+        drafts: dict[int, Future] = {}
 
-            try:
-                outcome = review_file(
-                    mr, file_diff, context, voice, review_state,
-                    # The last slot stays reserved for the closing note.
-                    charge=lambda: store.ledger.remaining() > 1 and _charge(store, mr_iid),
-                )
-            except Exception as exc:
-                logging.error("Review failed for %s: %s", file_diff.new_path, exc)
-                outcomes.append(FileOutcome(file_diff.new_path, "error", str(exc)[:120]))
-                # Safe only because review_file swallows its own post failures:
-                # nothing can have been posted by the time we get here, so the
-                # slot really is unspent.
-                store.ledger = store.ledger.refund()
-                # Persisted here, not left to the end of the loop body: the
-                # bare continue skipped the save, so the last file's charge
-                # stayed on the ledger and thirty outage pushes muted the MR.
-                _save_quietly(store, mr_iid)
-                continue
+        def draft_ahead(i: int) -> None:
+            for j in range(i, min(i + config.REVIEW_CONCURRENCY, len(kept))):
+                if j not in drafts:
+                    drafts[j] = pool.submit(draft_job, kept[j])
 
-            outcomes.append(outcome)
-            keys = [hunk_key(file_diff.new_path, h) for h in file_diff.hunks]
-            gave_up = False
-            if not outcome.settled:
-                # One retry, then record it anyway. Retrying for ever looks
-                # generous until you notice /review resets the budget: each
-                # command replayed the whole merge request, so twenty-one of
-                # them posted six hundred comments.
-                if store.ledger.already_retried(keys):
-                    gave_up = True
-                    logging.error(
-                        "MR !%s: %s failed to post twice; recording it rather "
-                        "than replaying the MR on every /review",
-                        mr_iid, file_diff.new_path,
+        try:
+            for i, file_diff in enumerate(kept):
+                draft_ahead(i)
+                if time.monotonic() - started > config.MR_TIMEOUT_S:
+                    outcomes.append(FileOutcome(
+                        file_diff.new_path, "skipped",
+                        f"MR deadline of {config.MR_TIMEOUT_S}s reached",
+                    ))
+                    drafts.pop(i).cancel()
+                    continue
+                if not review_state.open:
+                    outcomes.append(FileOutcome(
+                        file_diff.new_path, "skipped", "review backend rate limited",
+                    ))
+                    drafts.pop(i).cancel()
+                    continue
+                if store.ledger.remaining() <= 1:
+                    # The last slot is reserved for the closing note, so the run can
+                    # always tell the reader why it stopped.
+                    outcomes.append(FileOutcome(
+                        file_diff.new_path, "skipped", "MR comment budget reached",
+                    ))
+                    drafts.pop(i).cancel()
+                    continue
+
+                # Charged before review_file posts anything, and refunded below if
+                # it turns out nothing was posted. Saved per file, not once at the
+                # end: a crash mid-run would otherwise leave comments posted but
+                # unrecorded, and the next push would post every one of them again.
+                if not _charge(store, mr_iid):
+                    outcomes.append(FileOutcome(
+                        file_diff.new_path, "skipped", "review state could not be saved",
+                    ))
+                    break
+
+                try:
+                    outcome = review_file(
+                        mr, file_diff, "", voice, review_state, draft=drafts.pop(i),
+                        # The last slot stays reserved for the closing note.
+                        charge=lambda: store.ledger.remaining() > 1 and _charge(store, mr_iid),
                     )
-                else:
-                    store.ledger = store.ledger.mark_retried(keys)
-            # Deliberately a local, not a rewrite of the outcome: the closing
-            # note reads `settled` to tell the human which comments never
-            # arrived, and marking them delivered for the ledger's benefit made
-            # the note claim they had.
-            if outcome.status in ("reviewed", "clean") and (outcome.settled or gave_up):
-                # Only settled files are recorded. An errored or rate-limited
-                # file must be retried on the next push, so its hunks stay out.
-                store.ledger = store.ledger.record(keys)
-            if outcome.status != "reviewed":
-                store.ledger = store.ledger.refund()
-            _save_quietly(store, mr_iid)
+                except Exception as exc:
+                    logging.error("Review failed for %s: %s", file_diff.new_path, exc)
+                    outcomes.append(FileOutcome(file_diff.new_path, "error", str(exc)[:120]))
+                    # Safe only because review_file swallows its own post failures:
+                    # nothing can have been posted by the time we get here, so the
+                    # slot really is unspent.
+                    store.ledger = store.ledger.refund()
+                    # Persisted here, not left to the end of the loop body: the
+                    # bare continue skipped the save, so the last file's charge
+                    # stayed on the ledger and thirty outage pushes muted the MR.
+                    _save_quietly(store, mr_iid)
+                    continue
+
+                outcomes.append(outcome)
+                keys = [hunk_key(file_diff.new_path, h) for h in file_diff.hunks]
+                gave_up = False
+                if not outcome.settled:
+                    # One retry, then record it anyway. Retrying for ever looks
+                    # generous until you notice /review resets the budget: each
+                    # command replayed the whole merge request, so twenty-one of
+                    # them posted six hundred comments.
+                    if store.ledger.already_retried(keys):
+                        gave_up = True
+                        logging.error(
+                            "MR !%s: %s failed to post twice; recording it rather "
+                            "than replaying the MR on every /review",
+                            mr_iid, file_diff.new_path,
+                        )
+                    else:
+                        store.ledger = store.ledger.mark_retried(keys)
+                # Deliberately a local, not a rewrite of the outcome: the closing
+                # note reads `settled` to tell the human which comments never
+                # arrived, and marking them delivered for the ledger's benefit made
+                # the note claim they had.
+                if outcome.status in ("reviewed", "clean") and (outcome.settled or gave_up):
+                    # Only settled files are recorded. An errored or rate-limited
+                    # file must be retried on the next push, so its hunks stay out.
+                    store.ledger = store.ledger.record(keys)
+                if outcome.status != "reviewed":
+                    store.ledger = store.ledger.refund()
+                _save_quietly(store, mr_iid)
+
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         if store.ledger.saturated:
             # Reached at most once per transition without needing a guard: a

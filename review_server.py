@@ -19,9 +19,9 @@ if not config.OPENROUTER_API_KEY:
     _review_llm += "  [NO API KEY — every file will error]"
 logging.info(
     "Review LLM: %s ctx=%s max_out=%s per_file_timeout=%ss mr_timeout=%ss "
-    "include_context=%s",
+    "concurrency=%s include_context=%s",
     _review_llm, config.REVIEW_CONTEXT_TOKENS, config.REVIEW_MAX_OUTPUT_TOKENS,
-    config.PER_FILE_TIMEOUT_S, config.MR_TIMEOUT_S,
+    config.PER_FILE_TIMEOUT_S, config.MR_TIMEOUT_S, config.REVIEW_CONCURRENCY,
     config.INCLUDE_FILE_CONTEXT,
 )
 if config.SIDOROVICH_OLLAMA_FALLBACK:

@@ -1116,3 +1116,30 @@ def test_a_file_that_turns_binary_keeps_its_record(harness, monkeypatch):
 
     on_b = [c for c in recorder.inline if c[0] == "b.py"]
     assert len(on_b) == 1, f"b.py commented {len(on_b)} times"
+
+
+def test_files_are_drafted_in_parallel_but_posted_in_order(harness, monkeypatch):
+    """Sequential review made a 30-file MR take ten minutes. Drafting runs on
+    workers; posting must still follow file order, smallest first."""
+    import time
+
+    recorder, _ = harness
+    monkeypatch.setattr("reviewer.config.MAX_MR_FILES", 60)
+    monkeypatch.setattr("reviewer.config.REVIEW_CONCURRENCY", 4)
+    monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
+
+    def slow_review(system, user, deadline_s):
+        time.sleep(0.2)
+        return pipeline.ChatResult("**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0)
+
+    monkeypatch.setattr("reviewer.pipeline.review_chat", slow_review)
+    monkeypatch.setattr(
+        "reviewer.gitlab_client.fetch_file_diffs",
+        lambda mr: [fd(f"f{i}.py", added=i + 1) for i in range(4)],
+    )
+
+    started = time.monotonic()
+    pipeline.review_merge_request(1, 1)
+
+    assert time.monotonic() - started < 0.6, "four 0.2s reviews ran one by one"
+    assert [path for path, _ in recorder.inline] == [f"f{i}.py" for i in range(4)]

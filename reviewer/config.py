@@ -158,6 +158,9 @@ SNARK = env_bool("SNARK", True)
 # Deadlines and limits
 PER_FILE_TIMEOUT_S = env_int("PER_FILE_TIMEOUT_S", 90)
 MR_TIMEOUT_S = env_int("MR_TIMEOUT_S", 480)
+# Files drafted side by side. Only the review and voice calls run in parallel;
+# posting and the comment budget stay sequential, in file order.
+REVIEW_CONCURRENCY = max(1, env_int("REVIEW_CONCURRENCY", 4))
 # Reviewable files above which per-file review is skipped entirely and the MR
 # gets one note instead. A 300-file MR produced 592 comments before this.
 MAX_MR_FILES = env_int("MAX_MR_FILES", 60)
