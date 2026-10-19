@@ -164,6 +164,9 @@ REVIEW_CONCURRENCY = max(1, env_int("REVIEW_CONCURRENCY", 4))
 # Reviewable files above which per-file review is skipped entirely and the MR
 # gets one note instead. A 300-file MR produced 592 comments before this.
 MAX_MR_FILES = env_int("MAX_MR_FILES", 60)
+# SUGGESTIONs kept per file; every BLOCKER is kept. Past five the reader stops
+# reading, and the sixth suggestion is rarely the one that mattered.
+MAX_SUGGESTIONS_PER_FILE = env_int("MAX_SUGGESTIONS_PER_FILE", 5)
 # Comments the bot may post in one MR across its whole lifetime, counting inline
 # discussions, summaries and the oversized note. The state note is excluded: it
 # is created once and edited thereafter.

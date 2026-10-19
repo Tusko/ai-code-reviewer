@@ -28,4 +28,4 @@ def test_clean_response_preserves_fenced_indentation():
 
 
 def test_finding_tags_exported():
-    assert FINDING_TAGS == ("[BLOCKER]", "[SUGGESTION]", "[NIT]")
+    assert FINDING_TAGS == ("[BLOCKER]", "[SUGGESTION]")

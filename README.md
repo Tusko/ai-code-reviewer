@@ -87,6 +87,7 @@ forget the MR and review it from scratch.
 | A push whose hunks were all reviewed already | Posts nothing at all. |
 | A push with new hunks | Reviews only the new hunks. |
 | `MR_COMMENT_BUDGET` (30) comments reached | Posts one closing note and goes quiet until `/review`. |
+| More than `MAX_SUGGESTIONS_PER_FILE` (5) SUGGESTIONs in one file | Keeps every BLOCKER and the first five SUGGESTIONs, drops the rest. Findings in the same hunk share one comment. |
 | A rebase or force-push | Unchanged hunk content is not re-reviewed. Hunk keys hash content, not line numbers. |
 | A title or assignment problem | Posts one hygiene note (see below). Costs a comment slot like any other note. |
 

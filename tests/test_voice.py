@@ -29,8 +29,8 @@ def test_preserves_findings_rejects_dropped_tag():
 
 
 def test_preserves_findings_rejects_invented_fence():
-    original = "**🔵 [NIT]** cast it"
-    assert preserves_findings(original, "**🔵 [NIT]** хуйня\n```py\nx = 1\n```") is False
+    original = "**🟡 [SUGGESTION]** cast it"
+    assert preserves_findings(original, "**🟡 [SUGGESTION]** хуйня\n```py\nx = 1\n```") is False
 
 
 def test_preserves_findings_accepts_identical_fences():

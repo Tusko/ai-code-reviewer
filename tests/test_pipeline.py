@@ -239,27 +239,44 @@ def test_review_file_falls_back_to_note_when_inline_rejected(monkeypatch):
     assert note_calls[0][1] == "### 📄 `a.py`\n\n" + inline_calls[0][3]
 
 
-def test_review_file_posts_each_finding_on_its_own_line(monkeypatch):
-    """One comment per file pinned to the first added line put a finding
-    about line 40 on an import at line 1."""
-    reply = (
-        "**🟡 [SUGGESTION]** (line 3)\nBad key.\n\n"
-        "**🔵 [NIT]** (line 5)\nOff by one.\n\n"
-        "**🔴 [BLOCKER]** (Line 3)\nAlso bad."
-    )
+def _capture_inline(monkeypatch, reply):
     monkeypatch.setattr(pipeline, "review_chat",
                         lambda system, user, deadline_s: _chat_result(reply))
     inline = []
     monkeypatch.setattr(pipeline.gitlab_client, "post_inline",
                         lambda mr, path, line, body: inline.append((line, body)) or True)
     monkeypatch.setattr(pipeline.gitlab_client, "post_note", lambda *a: None)
+    return inline
+
+
+def test_review_file_groups_findings_in_one_hunk_into_one_comment(monkeypatch):
+    reply = (
+        "**🟡 [SUGGESTION]** (line 3)\nBad key.\n\n"
+        "**🔴 [BLOCKER]** (Line 5)\nAlso bad."
+    )
+    inline = _capture_inline(monkeypatch, reply)
 
     outcome = review_file(FakeMR(), fd("a.py", added=5), context="", charge=lambda: True)
 
     assert outcome.status == "reviewed"
-    assert [line for line, _ in inline] == [3, 5]
-    assert "Bad key." in inline[0][1] and "Also bad." in inline[0][1]
-    assert "(line" not in inline[0][1].lower()
+    # Anchored on the worst finding, which leads the comment.
+    assert [line for line, _ in inline] == [5]
+    body = inline[0][1]
+    assert body.index("_Рядок 5:_") < body.index("Also bad.") < body.index("_Рядок 3:_") < body.index("Bad key.")
+    assert "(line" not in body.lower()
+
+
+def test_review_file_posts_each_hunk_on_its_own_comment(monkeypatch):
+    """One comment per file pinned to the first added line put a finding
+    about line 40 on an import at line 1."""
+    reply = "**🟡 [SUGGESTION]** (line 2)\nfirst\n\n**🟡 [SUGGESTION]** (line 41)\nsecond"
+    inline = _capture_inline(monkeypatch, reply)
+    hunks = (Hunk(1, 1, (" a", "+b")), Hunk(1, 40, (" c", "+d")))
+
+    review_file(FakeMR(), fd("a.py", hunks=hunks), context="", charge=lambda: True)
+
+    assert [line for line, _ in inline] == [2, 41]
+    assert "_Рядок" not in inline[0][1] and "_Рядок" not in inline[1][1]
 
 
 def test_review_file_snaps_a_line_to_the_nearest_added_one(monkeypatch):
@@ -274,19 +291,92 @@ def test_review_file_snaps_a_line_to_the_nearest_added_one(monkeypatch):
     assert inline == [4]
 
 
-def test_review_file_folds_findings_it_cannot_pay_for(monkeypatch):
-    reply = "**🔴 [BLOCKER]** (line 2)\nfirst\n\n**🔵 [NIT]** (line 4)\nsecond"
-    monkeypatch.setattr(pipeline, "review_chat",
-                        lambda system, user, deadline_s: _chat_result(reply))
-    inline = []
-    monkeypatch.setattr(pipeline.gitlab_client, "post_inline",
-                        lambda mr, path, line, body: inline.append((line, body)) or True)
+def test_review_file_drops_comments_it_cannot_pay_for(monkeypatch):
+    reply = "**🟡 [SUGGESTION]** (line 2)\nfirst\n\n**🔴 [BLOCKER]** (line 41)\nsecond"
+    inline = _capture_inline(monkeypatch, reply)
+    hunks = (Hunk(1, 1, (" a", "+b")), Hunk(1, 40, (" c", "+d")))
 
-    review_file(FakeMR(), fd("a.py", added=3), context="", charge=lambda: False)
+    review_file(FakeMR(), fd("a.py", hunks=hunks), context="", charge=lambda: False)
 
     assert len(inline) == 1
-    assert inline[0][0] == 2
-    assert "first" in inline[0][1] and "_Рядок 4:_" in inline[0][1]
+    assert inline[0][0] == 41
+    assert "second" in inline[0][1] and "first" not in inline[0][1]
+
+
+def test_review_file_posts_nothing_for_a_reply_without_headings(monkeypatch):
+    inline = _capture_inline(monkeypatch, "Is the empty list intended here? Looks fine otherwise.")
+
+    outcome = review_file(FakeMR(), fd("a.py", added=3), context="")
+
+    assert outcome.status == "clean"
+    assert inline == []
+
+
+def test_review_file_drops_nit_findings(monkeypatch):
+    reply = "**🔵 [NIT]** (line 2)\ncast it\n\n**🔴 [BLOCKER]** (line 3)\nboom"
+    inline = _capture_inline(monkeypatch, reply)
+
+    review_file(FakeMR(), fd("a.py", added=3), context="")
+
+    assert len(inline) == 1
+    assert "boom" in inline[0][1] and "cast it" not in inline[0][1]
+    assert "_Рядок" not in inline[0][1]
+
+
+def test_review_file_drops_a_finding_the_model_retracts(monkeypatch):
+    inline = _capture_inline(monkeypatch, (
+        "**🟡 [SUGGESTION]** (line 2)\nMaybe off by one. No bug here on closer"
+        " inspection. [LGTM]\n\n**🔴 [BLOCKER]** (line 3)\nboom"
+    ))
+
+    review_file(FakeMR(), fd("a.py", added=3), context="")
+
+    assert len(inline) == 1
+    assert "boom" in inline[0][1] and "off by one" not in inline[0][1]
+
+
+def test_review_file_with_only_nits_is_clean(monkeypatch):
+    inline = _capture_inline(monkeypatch, "**🔵 [NIT]** (line 2)\ncast it")
+
+    outcome = review_file(FakeMR(), fd("a.py", added=3), context="")
+
+    assert outcome.status == "clean"
+    assert inline == []
+
+
+def test_review_file_keeps_every_blocker_and_caps_suggestions(monkeypatch):
+    monkeypatch.setattr("reviewer.config.MAX_SUGGESTIONS_PER_FILE", 5)
+    reply = "\n\n".join(
+        [f"**🟡 [SUGGESTION]** (line {n})\nsuggestion {n}" for n in range(2, 9)]
+        + [f"**🔴 [BLOCKER]** (line {n})\nblocker {n}" for n in range(9, 16)]
+    )
+    inline = _capture_inline(monkeypatch, reply)
+
+    review_file(FakeMR(), fd("a.py", added=16), context="")
+
+    body = inline[0][1]
+    assert inline[0][0] == 9
+    assert body.count("[BLOCKER]") == 7 and body.count("[SUGGESTION]") == 5
+    assert body.index("blocker 15") < body.index("suggestion 2")
+    assert "suggestion 7" not in body and "suggestion 8" not in body
+
+
+def test_review_file_truncated_before_any_heading_is_an_error_not_clean(monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "review_chat",
+        lambda system, user, deadline_s: _chat_result(
+            "Looking at the loop on line 2, the index", done_reason="length",
+        ),
+    )
+    inline = []
+    monkeypatch.setattr(pipeline.gitlab_client, "post_inline",
+                        lambda *a, **k: inline.append(a) or True)
+
+    outcome = review_file(FakeMR(), fd("a.py"), context="")
+
+    assert outcome.status == "error"
+    assert "truncated" in outcome.detail
+    assert inline == []
 
 
 def test_review_file_marks_truncated_response_but_still_posts(monkeypatch):

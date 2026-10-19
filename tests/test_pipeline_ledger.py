@@ -243,7 +243,7 @@ def test_the_summary_note_costs_a_slot(harness, monkeypatch):
     monkeypatch.setattr("reviewer.config.OPENROUTER_API_KEY", None)
     monkeypatch.setattr(
         "reviewer.pipeline.review_chat",
-        lambda system, user, deadline_s: pipeline.ChatResult("[LGTM]", "stop", 0, 0, 0.0),
+        lambda system, user, deadline_s: pipeline.ChatResult("**🔴 [BLOCKER]** boom", "stop", 0, 0, 0.0),
     )
     monkeypatch.setattr(
         "reviewer.gitlab_client.fetch_file_diffs", lambda mr: [fd("a.py")],

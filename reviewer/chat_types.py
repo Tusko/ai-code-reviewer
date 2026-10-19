@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 HARMONY_TOKEN_RE = re.compile(r"<\|[^>]*\|?>")
 FENCE_SPLIT_RE = re.compile(r"(```[\s\S]*?```)")
-FINDING_TAGS = ("[BLOCKER]", "[SUGGESTION]", "[NIT]")
+FINDING_TAGS = ("[BLOCKER]", "[SUGGESTION]")
 LGTM_TEXT = "LGTM. The changes are clean and follow best practices."
 # `LGTM`, `LGTM.`, `[LGTM]`, `**LGTM.**` — any bare clean verdict.
 BARE_LGTM_RE = re.compile(r"^[*\[\s]*LGTM[\]\s*.!]*$", re.IGNORECASE)

@@ -66,8 +66,12 @@ dedupe = DedupeCache()
 SKIP_BRANCH_PREFIXES = ("release/", "hotfix/")
 
 # A finding heading, and the `(line N)` the prompt asks the model to end it with.
+# NIT is no longer a tier but still matched, so a stray [NIT] heading is cut
+# off and dropped instead of riding along inside the finding above it.
 FINDING_HEADING_RE = re.compile(r"^.*\[(?:BLOCKER|SUGGESTION|NIT)\].*$", re.MULTILINE)
 FINDING_LINE_RE = re.compile(r"\s*\(\s*line\s+(\d+)\s*\)", re.IGNORECASE)
+# A finding the model retracts: "No bug here on closer inspection. [LGTM]".
+TRAILING_LGTM_RE = re.compile(r"\bLGTM\b[\]\s*.!]*$", re.IGNORECASE)
 
 
 def should_skip_branch(branch: str) -> bool:
@@ -242,19 +246,37 @@ def draft_file(
             )
 
     if not findings:
+        if truncated:
+            # Cut off before the first heading: unknown, not clean. Kept out of
+            # the ledger, so the next push reviews it again.
+            return FileOutcome(path, "error", "truncated at output token limit")
         return FileOutcome(path, "clean", l2_detail)
 
+    # Every BLOCKER, then the capped rest. The model's order holds within a tier.
+    blockers = [f for f in findings if "[BLOCKER]" in f[1]]
+    rest = [f for f in findings if "[BLOCKER]" not in f[1]]
+    findings = blockers + rest[:config.MAX_SUGGESTIONS_PER_FILE]
+
     added = sorted(n for h in file_diff.hunks for n, _ in h.added_lines())
-    groups: dict[int | None, list[tuple[str, bool]]] = {}
+    hunk_of = {n: i for i, h in enumerate(file_diff.hunks) for n, _ in h.added_lines()}
+    # One comment per hunk, anchored on its worst finding's line.
+    groups: dict[int | None, list[tuple[int | None, str, bool]]] = {}
     for line, text, dry in findings:
-        groups.setdefault(snap_to_added(line, added), []).append((text, dry))
+        anchor = snap_to_added(line, added)
+        groups.setdefault(hunk_of.get(anchor), []).append((anchor, text, dry))
 
     comments: list[tuple[int | None, str]] = []
-    for anchor, items in groups.items():
-        text = "\n\n".join(t for t, _ in items)
-        if not any(dry for _, dry in items):
+    for items in groups.values():
+        if len(items) == 1:
+            text = items[0][1]
+        else:
+            text = "\n\n".join(
+                f"_Рядок {anchor}:_\n\n{t}" if anchor is not None else t
+                for anchor, t, _ in items
+            )
+        if not any(dry for _, _, dry in items):
             text = flavor_review(text, voice)
-        comments.append((anchor, text))
+        comments.append((items[0][0], text))
 
     detail = l2_detail if l2_detail else f"{len(comments)} comment(s)"
     if truncated:
@@ -266,19 +288,16 @@ def post_draft(
     mr, path: str, draft: Draft, charge: "Callable[[], bool] | None" = None,
 ) -> FileOutcome:
     """Posts a draft. The caller has paid for one comment. Every further one is
-    bought through `charge`; once it says no, the rest ride in the last one."""
+    bought through `charge`; once it says no, the rest are dropped."""
     comments = list(draft.comments)
     slots = 1
     while slots < len(comments) and (charge is None or charge()):
         slots += 1
     if slots < len(comments):
-        # Out of budget: the leftovers ride in the last comment, labelled with
-        # the line each one is about, rather than being dropped.
-        tail = comments[slots - 1:]
-        comments = comments[:slots - 1] + [(tail[0][0], "\n\n".join(
-            f"_Рядок {anchor}:_\n\n{text}" if anchor is not None else text
-            for anchor, text in tail
-        ))]
+        # Comments come worst first, so what falls off the end is the least of it.
+        logging.info("%s: %s comment(s) dropped, MR comment budget reached",
+                     path, len(comments) - slots)
+        comments = comments[:slots]
     if draft.truncated:
         last_anchor, last_text = comments[-1]
         comments[-1] = (last_anchor, last_text + (
@@ -310,17 +329,23 @@ def post_draft(
 def split_findings(text: str) -> list[tuple[int | None, str]]:
     """Cuts a review into (line, finding) pairs, the `(line N)` removed.
 
-    Anything before the first heading stays with it, and a reply with no
-    heading at all is one finding with no line.
+    Anything before the first heading stays with it. A reply with no heading
+    at all is prose -- "is X intended?", "looks fine" -- and yields nothing, as
+    does any chunk whose heading is not one of FINDING_TAGS or that ends in
+    an LGTM verdict.
     """
     starts = [m.start() for m in FINDING_HEADING_RE.finditer(text)]
     if not starts:
-        return [(None, text.strip())]
+        return []
     starts[0] = 0
     out = []
     for begin, end in zip(starts, starts[1:] + [len(text)]):
         chunk = text[begin:end].strip()
         heading = FINDING_HEADING_RE.search(chunk)
+        if not any(tag in heading.group() for tag in FINDING_TAGS):
+            continue
+        if TRAILING_LGTM_RE.search(chunk):
+            continue
         match = FINDING_LINE_RE.search(heading.group())
         line = int(match.group(1)) if match else None
         if match:
